@@ -18,7 +18,6 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
-typedef long ssize_t;
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -230,9 +229,9 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks)
     if (!mr_send_handshake(sock, width, height, depth, palette_entries))
         goto done;
 
-    printf("Viewer connected: %ux%u, %u bitplanes, %lu tiles.\n",
+    printf("Viewer connected: %ux%u, %u bitplanes, %u tiles.\n",
            (unsigned int)width, (unsigned int)height,
-           (unsigned int)depth, tile_count);
+           (unsigned int)depth, (unsigned int)tile_count);
     connected = 1;
 
     while (!mr_ctrl_c_pressed()) {
@@ -277,8 +276,8 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks)
         if (!mr_send_frame_end(sock, frame_id, changed)) break;
 
         if ((frame_id % 50UL) == 0)
-            printf("Frame %lu: %u changed tiles.\n",
-                   frame_id, (unsigned int)changed);
+            printf("Frame %u: %u changed tiles.\n",
+                   (unsigned int)frame_id, (unsigned int)changed);
         ++frame_id;
         Delay(delay_ticks);
     }
@@ -312,9 +311,11 @@ int main(int argc, char **argv)
         return 10;
     }
 
-    IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 37);
-    GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 37);
-    SocketBase = OpenLibrary("bsdsocket.library", 4);
+    IntuitionBase = (struct IntuitionBase *)OpenLibrary(
+        (CONST_STRPTR)"intuition.library", 37);
+    GfxBase = (struct GfxBase *)OpenLibrary(
+        (CONST_STRPTR)"graphics.library", 37);
+    SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
     if (!IntuitionBase || !GfxBase || !SocketBase) {
         printf("MintREMOTE requires intuition/graphics v37 and bsdsocket v4.\n");
         goto done;
@@ -326,7 +327,6 @@ int main(int argc, char **argv)
         goto done;
     }
     if (screen->Width <= 0 || screen->Height <= 0 ||
-        screen->Width > 65535 || screen->Height > 65535 ||
         screen->RastPort.BitMap->Depth == 0 ||
         screen->RastPort.BitMap->Depth > 8) {
         printf("PR1 supports native planar Workbench screens up to 8 bitplanes.\n");
@@ -358,11 +358,12 @@ int main(int argc, char **argv)
 
     if (bind(listen_sock, (struct sockaddr *)&address, sizeof(address)) < 0 ||
         listen(listen_sock, 1) < 0) {
-        printf("Could not listen on TCP port %lu.\n", port);
+        printf("Could not listen on TCP port %u.\n", (unsigned int)port);
         goto done;
     }
 
-    printf("MintREMOTE PR1 waiting on TCP port %lu. Ctrl-C stops it.\n", port);
+    printf("MintREMOTE PR1 waiting on TCP port %u. Ctrl-C stops it.\n",
+           (unsigned int)port);
     client_sock = accept(listen_sock, NULL, NULL);
     if (client_sock < 0) {
         printf("Accept failed or was interrupted.\n");
