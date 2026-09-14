@@ -25,3 +25,9 @@ jobs:
             bash -c 'set -e; m68k-amigaos-gcc --version | head -1; make'
       - name: Confirm the Amiga executable was produced
         run: test -f MintRemoteServer
+      - name: Publish the AmigaOS prototype
+        uses: actions/upload-artifact@v4
+        with:
+          name: MintRemoteServer-AmigaOS
+          path: MintRemoteServer
+          if-no-files-found: error
