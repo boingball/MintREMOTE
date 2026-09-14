@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+
+  amiga-cross-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the AmigaOS server
+        run: |
+          docker run --rm -v "$PWD":/src -w /src \
+            sacredbanana/amiga-compiler:m68k-amigaos \
+            bash -c 'set -e; m68k-amigaos-gcc --version | head -1; make'
+      - name: Confirm the Amiga executable was produced
+        run: test -f MintRemoteServer
