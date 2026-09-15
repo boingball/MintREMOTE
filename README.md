@@ -51,6 +51,15 @@ MintRemoteServer [port] [delay_ticks] [INPUT]
 MintRemoteServer 5909 5 INPUT
 ```
 
+Arguments use the normal AmigaDOS `ReadArgs` template
+`PORT/N,DELAY/N,INPUT/S`. The switch can therefore be used on its own or with
+named values:
+
+```text
+MintRemoteServer INPUT
+MintRemoteServer PORT=5909 DELAY=5 INPUT
+```
+
 `delay_ticks` is the pause between scans in Amiga ticks (normally 50 ticks per
 second). Five ticks targets roughly ten scans per second without busy-looping.
 Input is polled once per tick so it remains responsive independently of the

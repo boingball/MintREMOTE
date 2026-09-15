@@ -27,7 +27,6 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "mintremote_protocol.h"
@@ -516,10 +515,12 @@ done:
     return connected;
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
     LONG listen_sock = -1;
     LONG client_sock = -1;
+    LONG args[3] = {0, 0, 0};
+    struct RDArgs *rdargs = NULL;
     struct sockaddr_in address;
     struct Screen *screen = NULL;
     struct MRInputContext input;
@@ -531,15 +532,21 @@ int main(int argc, char **argv)
 
     memset(&input, 0, sizeof(input));
 
-    if (argc > 1) port = (ULONG)atol(argv[1]);
-    if (argc > 2) delay_ticks = (ULONG)atol(argv[2]);
-    if (argc > 3 &&
-        (strcmp(argv[3], "INPUT") == 0 || strcmp(argv[3], "input") == 0))
-        enable_input = 1;
-    if (argc > 4 || (argc > 3 && !enable_input) ||
-        port == 0 || port > 65535UL || delay_ticks == 0 ||
+    rdargs = ReadArgs((CONST_STRPTR)"PORT/N,DELAY/N,INPUT/S", args, NULL);
+    if (!rdargs) {
+        PrintFault(IoErr(), (CONST_STRPTR)"MintRemoteServer");
+        printf("Usage: MintRemoteServer [PORT] [DELAY] [INPUT]\n");
+        printf("   or: MintRemoteServer PORT=5909 DELAY=5 INPUT\n");
+        return 10;
+    }
+    if (args[0]) port = (ULONG)*(LONG *)args[0];
+    if (args[1]) delay_ticks = (ULONG)*(LONG *)args[1];
+    enable_input = args[2] != 0;
+
+    if (port == 0 || port > 65535UL || delay_ticks == 0 ||
         delay_ticks > 250UL) {
-        printf("Usage: MintRemoteServer [port] [delay_ticks] [INPUT]\n");
+        printf("PORT must be 1-65535 and DELAY must be 1-250.\n");
+        FreeArgs(rdargs);
         return 10;
     }
 
@@ -620,5 +627,6 @@ done:
     if (SocketBase) CloseLibrary(SocketBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);
     if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);
+    if (rdargs) FreeArgs(rdargs);
     return result;
 }

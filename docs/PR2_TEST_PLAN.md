@@ -8,6 +8,9 @@ On a native planar Workbench, run:
 MintRemoteServer 5909 5 INPUT
 ```
 
+The equivalent AmigaDOS forms `MintRemoteServer INPUT` and
+`MintRemoteServer PORT=5909 DELAY=5 INPUT` must also enable input.
+
 Connect the Python viewer and click inside its Amiga display to give it
 keyboard focus.
 
