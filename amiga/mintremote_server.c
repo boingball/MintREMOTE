@@ -45,6 +45,7 @@ struct MRInputContext {
     UWORD used;
     UBYTE keys[128];
     UBYTE buttons;
+    UWORD qualifier;
 };
 
 static UWORD mr_get16(const UBYTE *p)
@@ -107,11 +108,28 @@ static void mr_write_input_event(struct MRInputContext *input,
 static void mr_inject_pointer(struct MRInputContext *input,
                               struct Screen *screen, UWORD x, UWORD y)
 {
+    struct IEPointerPixel pointer;
+    struct InputEvent event;
     WORD px = (WORD)(x >= (UWORD)screen->Width ? screen->Width - 1 : x);
     WORD py = (WORD)(y >= (UWORD)screen->Height ? screen->Height - 1 : y);
 
-    mr_write_input_event(input, IECLASS_POINTERPOS, IECODE_NOBUTTON,
-                         0, px, py);
+    memset(&pointer, 0, sizeof(pointer));
+    pointer.iepp_Screen = screen;
+    pointer.iepp_Position.X = px;
+    pointer.iepp_Position.Y = py;
+
+    memset(&event, 0, sizeof(event));
+    event.ie_Class = IECLASS_NEWPOINTERPOS;
+    event.ie_SubClass = IESUBCLASS_PIXEL;
+    event.ie_Code = IECODE_NOBUTTON;
+    event.ie_Qualifier = input->qualifier;
+    event.ie_EventAddress = (APTR)&pointer;
+
+    input->request->io_Command = IND_WRITEEVENT;
+    input->request->io_Flags = 0;
+    input->request->io_Data = (APTR)&event;
+    input->request->io_Length = sizeof(event);
+    DoIO((struct IORequest *)input->request);
 }
 
 static void mr_inject_button(struct MRInputContext *input,
@@ -131,13 +149,26 @@ static void mr_inject_button(struct MRInputContext *input,
         mask = 4U;
     }
 
-    if (down)
+    if (down) {
         input->buttons |= mask;
-    else {
+        if (button == MR_MOUSE_LEFT)
+            input->qualifier |= IEQUALIFIER_LEFTBUTTON;
+        else if (button == MR_MOUSE_MIDDLE)
+            input->qualifier |= IEQUALIFIER_MIDBUTTON;
+        else
+            input->qualifier |= IEQUALIFIER_RBUTTON;
+    } else {
         input->buttons &= (UBYTE)~mask;
+        if (button == MR_MOUSE_LEFT)
+            input->qualifier &= (UWORD)~IEQUALIFIER_LEFTBUTTON;
+        else if (button == MR_MOUSE_MIDDLE)
+            input->qualifier &= (UWORD)~IEQUALIFIER_MIDBUTTON;
+        else
+            input->qualifier &= (UWORD)~IEQUALIFIER_RBUTTON;
         code |= IECODE_UP_PREFIX;
     }
-    mr_write_input_event(input, IECLASS_RAWMOUSE, code, 0, 0, 0);
+    mr_write_input_event(input, IECLASS_RAWMOUSE, code,
+                         input->qualifier, 0, 0);
 }
 
 static void mr_inject_key(struct MRInputContext *input,
@@ -145,9 +176,33 @@ static void mr_inject_key(struct MRInputContext *input,
 {
     UWORD code = raw_key;
 
+    if (raw_key == 0x60U) {
+        if (down) input->qualifier |= IEQUALIFIER_LSHIFT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LSHIFT;
+    } else if (raw_key == 0x61U) {
+        if (down) input->qualifier |= IEQUALIFIER_RSHIFT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RSHIFT;
+    } else if (raw_key == 0x63U) {
+        if (down) input->qualifier |= IEQUALIFIER_CONTROL;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_CONTROL;
+    } else if (raw_key == 0x64U) {
+        if (down) input->qualifier |= IEQUALIFIER_LALT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LALT;
+    } else if (raw_key == 0x65U) {
+        if (down) input->qualifier |= IEQUALIFIER_RALT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RALT;
+    } else if (raw_key == 0x66U) {
+        if (down) input->qualifier |= IEQUALIFIER_LCOMMAND;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LCOMMAND;
+    } else if (raw_key == 0x67U) {
+        if (down) input->qualifier |= IEQUALIFIER_RCOMMAND;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RCOMMAND;
+    }
+
     input->keys[raw_key] = down;
     if (!down) code |= IECODE_UP_PREFIX;
-    mr_write_input_event(input, IECLASS_RAWKEY, code, 0, 0, 0);
+    mr_write_input_event(input, IECLASS_RAWKEY, code,
+                         input->qualifier, 0, 0);
 }
 
 static void mr_release_all_input(struct MRInputContext *input)

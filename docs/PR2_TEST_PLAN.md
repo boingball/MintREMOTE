@@ -24,6 +24,9 @@ keyboard focus.
    responsive and screen streaming should not regress.
 6. Alt-tab away from the viewer while holding a button and confirm it is not
    left stuck down on the Amiga.
+7. Rapidly double-click a window, drag it, and release both inside and outside
+   the viewer. Repeat this several times; the drag must never remain latched,
+   and later mouse movement must not replay as a delayed burst.
 
 ## Keyboard checks
 

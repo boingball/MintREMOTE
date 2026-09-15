@@ -94,12 +94,16 @@ class MintRemoteViewer:
         self.input_enabled = False
         self.pressed_keys: set[int] = set()
         self.pressed_buttons: set[int] = set()
+        self.pending_mouse: tuple[int, int] | None = None
+        self.mouse_send_after: str | None = None
         self.image_label.bind("<Motion>", self.mouse_move)
         self.image_label.bind("<ButtonPress>", self.mouse_button_down)
-        self.image_label.bind("<ButtonRelease>", self.mouse_button_up)
         self.image_label.bind("<KeyPress>", self.key_down)
         self.image_label.bind("<KeyRelease>", self.key_up)
         self.image_label.bind("<FocusOut>", self.release_all_input)
+        # A local grab keeps a drag routed to the display, while bind_all is a
+        # final safety net for a release delivered after the event target moves.
+        self.root.bind_all("<ButtonRelease>", self.mouse_button_up, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def run(self) -> None:
@@ -222,22 +226,51 @@ class MintRemoteViewer:
             return
         x = max(0, min(self.remote_width - 1, event.x // self.scale))
         y = max(0, min(self.remote_height - 1, event.y // self.scale))
-        self.send_input(pack_mouse_move(x, y))
+        self.pending_mouse = (x, y)
+        if self.mouse_send_after is None:
+            self.mouse_send_after = self.root.after(16, self.scheduled_mouse_move)
 
-    def mouse_button_down(self, event: tk.Event) -> None:
+    def scheduled_mouse_move(self) -> None:
+        self.mouse_send_after = None
+        self.flush_mouse_move()
+
+    def flush_mouse_move(self) -> None:
+        if self.mouse_send_after is not None:
+            self.root.after_cancel(self.mouse_send_after)
+            self.mouse_send_after = None
+        position = self.pending_mouse
+        self.pending_mouse = None
+        if position is not None:
+            self.send_input(pack_mouse_move(*position))
+
+    def mouse_button_down(self, event: tk.Event) -> str | None:
         button = TK_MOUSE_BUTTONS.get(event.num)
         if button is None:
-            return
+            return None
         self.image_label.focus_set()
+        self.flush_mouse_move()
         if button not in self.pressed_buttons:
             self.pressed_buttons.add(button)
+            try:
+                self.image_label.grab_set()
+            except tk.TclError:
+                pass
             self.send_input(pack_mouse_button(button, True))
+        return "break"
 
-    def mouse_button_up(self, event: tk.Event) -> None:
+    def mouse_button_up(self, event: tk.Event) -> str | None:
         button = TK_MOUSE_BUTTONS.get(event.num)
         if button is not None and button in self.pressed_buttons:
+            self.flush_mouse_move()
             self.pressed_buttons.remove(button)
             self.send_input(pack_mouse_button(button, False))
+            if not self.pressed_buttons:
+                try:
+                    self.image_label.grab_release()
+                except tk.TclError:
+                    pass
+            return "break"
+        return None
 
     @staticmethod
     def raw_key(event: tk.Event) -> int | None:
@@ -261,12 +294,20 @@ class MintRemoteViewer:
         return "break"
 
     def release_all_input(self, _event: tk.Event | None = None) -> None:
+        if self.mouse_send_after is not None:
+            self.root.after_cancel(self.mouse_send_after)
+            self.mouse_send_after = None
+        self.pending_mouse = None
         for raw_key in tuple(self.pressed_keys):
             self.send_input(pack_raw_key(raw_key, False))
         for button in tuple(self.pressed_buttons):
             self.send_input(pack_mouse_button(button, False))
         self.pressed_keys.clear()
         self.pressed_buttons.clear()
+        try:
+            self.image_label.grab_release()
+        except tk.TclError:
+            pass
 
     def close(self) -> None:
         self.release_all_input()
