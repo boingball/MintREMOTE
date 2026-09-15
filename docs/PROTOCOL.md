@@ -1,4 +1,4 @@
-# MintREMOTE PR1 protocol
+# MintREMOTE protocol version 2
 
 All multi-byte integers are unsigned and big-endian. This matches the native
 680x0 byte order and keeps the Amiga sender simple.
@@ -10,7 +10,7 @@ The server sends exactly 20 bytes after accepting a connection:
 | Offset | Type | Meaning |
 |---:|---|---|
 | 0 | 4 bytes | Magic `MRM1` |
-| 4 | u16 | Protocol version, currently 1 |
+| 4 | u16 | Protocol version, currently 2 |
 | 6 | u16 | Screen width |
 | 8 | u16 | Screen height |
 | 10 | u16 | Nominal tile width |
@@ -26,10 +26,16 @@ Every subsequent message starts with:
 | Type | Meaning |
 |---|---|
 | u8 | Message type |
-| u8 | Flags, zero in PR1 |
+| u8 | Flags, currently zero |
 | u16 | Payload length |
 
-Unknown types or non-zero flags are protocol errors in PR1.
+Non-zero message flags are currently a protocol error.
+
+## Capabilities message: type 5
+
+The server sends this immediately after the handshake. Its payload is a u16
+bit field. Bit 0 (`MR_CAP_INPUT`) means the server was launched with remote
+input enabled. A viewer must not transmit input when that bit is clear.
 
 ## Palette message: type 1
 
@@ -70,12 +76,35 @@ The viewer presents its updated framebuffer when this message arrives.
 
 ## Goodbye message: type 4
 
-Reserved for a graceful server shutdown. PR1 normally ends the TCP connection.
+Reserved for a graceful server shutdown. The prototype normally ends the TCP
+connection.
+
+## Client-to-server input
+
+Input uses the same four-byte message header. The server accepts these only
+when its capabilities include `MR_CAP_INPUT`.
+
+### Pointer position: type 128
+
+The four-byte payload is an absolute u16 X coordinate followed by an absolute
+u16 Y coordinate. The server clamps both to the captured screen and writes an
+`IECLASS_POINTERPOS` event to `input.device`.
+
+### Mouse button: type 129
+
+The two-byte payload contains a button number (1 left, 2 middle, 3 right) and a
+state (0 released, 1 pressed).
+
+### Raw key: type 130
+
+The two-byte payload contains an Amiga raw key code from 0 through 127 and a
+state (0 released, 1 pressed). The Python viewer maps ordinary PC keys to their
+physical Amiga equivalents. Text/Unicode is deliberately not sent because
+applications on the Amiga expect raw key events and the Amiga's configured
+keymap remains authoritative.
 
 ## Deliberate omissions
 
-PR1 has no client-to-server messages, compression, authentication, encryption,
-acknowledgements or screen-mode-change message. Those are not accidentally
-missing: the first test is intended to measure native planar capture cost,
-changed-tile behaviour and real TCP throughput before the protocol grows.
-
+The protocol still has no compression, authentication, encryption,
+acknowledgements, clipboard transfer or screen-mode-change message. It must be
+used only on a trusted LAN. Remote input is an explicit server-side option.

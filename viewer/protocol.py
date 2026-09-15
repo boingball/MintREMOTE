@@ -1,4 +1,4 @@
-"""MintREMOTE PR1 wire protocol and planar conversion helpers."""
+"""MintREMOTE wire protocol, input packets and planar conversion helpers."""
 
 from __future__ import annotations
 
@@ -8,18 +8,32 @@ import struct
 from typing import Sequence
 
 MAGIC = b"MRM1"
-VERSION = 1
+VERSION = 2
 PIXEL_PLANAR_INDEXED = 1
 
 MSG_PALETTE = 1
 MSG_TILE = 2
 MSG_FRAME_END = 3
 MSG_GOODBYE = 4
+MSG_CAPABILITIES = 5
+
+MSG_MOUSE_MOVE = 128
+MSG_MOUSE_BUTTON = 129
+MSG_RAW_KEY = 130
+
+CAP_INPUT = 1
+
+MOUSE_LEFT = 1
+MOUSE_MIDDLE = 2
+MOUSE_RIGHT = 3
 
 HANDSHAKE = struct.Struct(">4s8H")
 MESSAGE_HEADER = struct.Struct(">BBH")
 TILE_HEADER = struct.Struct(">I5H2B")
 FRAME_END = struct.Struct(">IHH")
+CAPABILITIES = struct.Struct(">H")
+MOUSE_MOVE = struct.Struct(">HH")
+BUTTON_OR_KEY = struct.Struct(">BB")
 
 
 @dataclass(frozen=True)
@@ -107,6 +121,27 @@ def parse_frame_end(payload: bytes) -> tuple[int, int, int]:
     if len(payload) != FRAME_END.size:
         raise ValueError("invalid frame-end message")
     return FRAME_END.unpack(payload)
+
+
+def parse_capabilities(payload: bytes) -> int:
+    if len(payload) != CAPABILITIES.size:
+        raise ValueError("invalid capabilities message")
+    return CAPABILITIES.unpack(payload)[0]
+
+
+def parse_mouse_move(payload: bytes) -> tuple[int, int]:
+    if len(payload) != MOUSE_MOVE.size:
+        raise ValueError("invalid mouse-move message")
+    return MOUSE_MOVE.unpack(payload)
+
+
+def parse_button_or_key(payload: bytes) -> tuple[int, bool]:
+    if len(payload) != BUTTON_OR_KEY.size:
+        raise ValueError("invalid button/key message")
+    code, down = BUTTON_OR_KEY.unpack(payload)
+    if down not in (0, 1):
+        raise ValueError("invalid button/key state")
+    return code, bool(down)
 
 
 def apply_planar_tile(
@@ -208,6 +243,28 @@ def pack_tile(tile: Tile) -> bytes:
 
 def pack_frame_end(frame_id: int, changed_tiles: int, scan_ms: int = 0) -> bytes:
     return pack_message(MSG_FRAME_END, FRAME_END.pack(frame_id, changed_tiles, scan_ms))
+
+
+def pack_capabilities(capabilities: int) -> bytes:
+    return pack_message(MSG_CAPABILITIES, CAPABILITIES.pack(capabilities))
+
+
+def pack_mouse_move(x: int, y: int) -> bytes:
+    if not (0 <= x <= 65535 and 0 <= y <= 65535):
+        raise ValueError("mouse position is outside the protocol range")
+    return pack_message(MSG_MOUSE_MOVE, MOUSE_MOVE.pack(x, y))
+
+
+def pack_mouse_button(button: int, down: bool) -> bytes:
+    if button not in (MOUSE_LEFT, MOUSE_MIDDLE, MOUSE_RIGHT):
+        raise ValueError("unknown mouse button")
+    return pack_message(MSG_MOUSE_BUTTON, BUTTON_OR_KEY.pack(button, int(down)))
+
+
+def pack_raw_key(raw_key: int, down: bool) -> bytes:
+    if not 0 <= raw_key < 128:
+        raise ValueError("raw key must be in the range 0-127")
+    return pack_message(MSG_RAW_KEY, BUTTON_OR_KEY.pack(raw_key, int(down)))
 
 
 def encode_indexed_tile(

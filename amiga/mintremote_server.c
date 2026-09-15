@@ -1,14 +1,17 @@
 /*
- * MintREMOTE PR1 native-planar capture prototype.
+ * MintREMOTE PR2 native-planar capture and remote-input prototype.
  *
  * Captures the public Workbench screen as native bitplane tiles and sends
  * only changed tiles to a single TCP client. The PC performs all planar to
- * RGB conversion. This is deliberately a trusted-LAN, view-only prototype.
+ * RGB conversion. Optional client input is injected through input.device.
  */
 
 #include <exec/types.h>
 #include <exec/memory.h>
 #include <exec/libraries.h>
+#include <exec/io.h>
+#include <devices/input.h>
+#include <devices/inputevent.h>
 #include <dos/dos.h>
 #include <intuition/intuition.h>
 #include <graphics/gfx.h>
@@ -21,9 +24,9 @@
 #include <sys/types.h>
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "mintremote_protocol.h"
@@ -31,6 +34,24 @@
 struct Library *SocketBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
+
+#define MR_INPUT_BUFFER_BYTES 512
+
+struct MRInputContext {
+    struct MsgPort *port;
+    struct IOStdReq *request;
+    UBYTE device_open;
+    UBYTE buffer[MR_INPUT_BUFFER_BYTES];
+    UWORD used;
+    UBYTE keys[128];
+    UBYTE buttons;
+    UWORD qualifier;
+};
+
+static UWORD mr_get16(const UBYTE *p)
+{
+    return (UWORD)(((UWORD)p[0] << 8) | p[1]);
+}
 
 static void mr_put16(UBYTE *p, UWORD value)
 {
@@ -44,6 +65,173 @@ static void mr_put32(UBYTE *p, ULONG value)
     p[1] = (UBYTE)(value >> 16);
     p[2] = (UBYTE)(value >> 8);
     p[3] = (UBYTE)value;
+}
+
+static int mr_input_open(struct MRInputContext *input)
+{
+    memset(input, 0, sizeof(*input));
+    input->port = CreateMsgPort();
+    if (!input->port) return 0;
+
+    input->request = (struct IOStdReq *)CreateIORequest(
+        input->port, sizeof(struct IOStdReq));
+    if (!input->request) return 0;
+
+    if (OpenDevice((CONST_STRPTR)"input.device", 0,
+                   (struct IORequest *)input->request, 0) != 0)
+        return 0;
+
+    input->device_open = 1;
+    return 1;
+}
+
+static void mr_write_input_event(struct MRInputContext *input,
+                                 UBYTE event_class, UWORD code,
+                                 UWORD qualifier, WORD x, WORD y)
+{
+    struct InputEvent event;
+
+    memset(&event, 0, sizeof(event));
+    event.ie_Class = event_class;
+    event.ie_Code = code;
+    event.ie_Qualifier = qualifier;
+    event.ie_X = x;
+    event.ie_Y = y;
+
+    input->request->io_Command = IND_WRITEEVENT;
+    input->request->io_Flags = 0;
+    input->request->io_Data = (APTR)&event;
+    input->request->io_Length = sizeof(event);
+    DoIO((struct IORequest *)input->request);
+}
+
+static void mr_inject_pointer(struct MRInputContext *input,
+                              struct Screen *screen, UWORD x, UWORD y)
+{
+    struct IEPointerPixel pointer;
+    struct InputEvent event;
+    WORD px = (WORD)(x >= (UWORD)screen->Width ? screen->Width - 1 : x);
+    WORD py = (WORD)(y >= (UWORD)screen->Height ? screen->Height - 1 : y);
+
+    memset(&pointer, 0, sizeof(pointer));
+    pointer.iepp_Screen = screen;
+    pointer.iepp_Position.X = px;
+    pointer.iepp_Position.Y = py;
+
+    memset(&event, 0, sizeof(event));
+    event.ie_Class = IECLASS_NEWPOINTERPOS;
+    event.ie_SubClass = IESUBCLASS_PIXEL;
+    event.ie_Code = IECODE_NOBUTTON;
+    event.ie_Qualifier = input->qualifier;
+    event.ie_EventAddress = (APTR)&pointer;
+
+    input->request->io_Command = IND_WRITEEVENT;
+    input->request->io_Flags = 0;
+    input->request->io_Data = (APTR)&event;
+    input->request->io_Length = sizeof(event);
+    DoIO((struct IORequest *)input->request);
+}
+
+static void mr_inject_button(struct MRInputContext *input,
+                             UBYTE button, UBYTE down)
+{
+    UWORD code;
+    UBYTE mask;
+
+    if (button == MR_MOUSE_LEFT) {
+        code = IECODE_LBUTTON;
+        mask = 1U;
+    } else if (button == MR_MOUSE_MIDDLE) {
+        code = IECODE_MBUTTON;
+        mask = 2U;
+    } else {
+        code = IECODE_RBUTTON;
+        mask = 4U;
+    }
+
+    if (down) {
+        input->buttons |= mask;
+        if (button == MR_MOUSE_LEFT)
+            input->qualifier |= IEQUALIFIER_LEFTBUTTON;
+        else if (button == MR_MOUSE_MIDDLE)
+            input->qualifier |= IEQUALIFIER_MIDBUTTON;
+        else
+            input->qualifier |= IEQUALIFIER_RBUTTON;
+    } else {
+        input->buttons &= (UBYTE)~mask;
+        if (button == MR_MOUSE_LEFT)
+            input->qualifier &= (UWORD)~IEQUALIFIER_LEFTBUTTON;
+        else if (button == MR_MOUSE_MIDDLE)
+            input->qualifier &= (UWORD)~IEQUALIFIER_MIDBUTTON;
+        else
+            input->qualifier &= (UWORD)~IEQUALIFIER_RBUTTON;
+        code |= IECODE_UP_PREFIX;
+    }
+    mr_write_input_event(input, IECLASS_RAWMOUSE, code,
+                         input->qualifier, 0, 0);
+}
+
+static void mr_inject_key(struct MRInputContext *input,
+                          UBYTE raw_key, UBYTE down)
+{
+    UWORD code = raw_key;
+
+    if (raw_key == 0x60U) {
+        if (down) input->qualifier |= IEQUALIFIER_LSHIFT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LSHIFT;
+    } else if (raw_key == 0x61U) {
+        if (down) input->qualifier |= IEQUALIFIER_RSHIFT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RSHIFT;
+    } else if (raw_key == 0x63U) {
+        if (down) input->qualifier |= IEQUALIFIER_CONTROL;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_CONTROL;
+    } else if (raw_key == 0x64U) {
+        if (down) input->qualifier |= IEQUALIFIER_LALT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LALT;
+    } else if (raw_key == 0x65U) {
+        if (down) input->qualifier |= IEQUALIFIER_RALT;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RALT;
+    } else if (raw_key == 0x66U) {
+        if (down) input->qualifier |= IEQUALIFIER_LCOMMAND;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_LCOMMAND;
+    } else if (raw_key == 0x67U) {
+        if (down) input->qualifier |= IEQUALIFIER_RCOMMAND;
+        else input->qualifier &= (UWORD)~IEQUALIFIER_RCOMMAND;
+    }
+
+    input->keys[raw_key] = down;
+    if (!down) code |= IECODE_UP_PREFIX;
+    mr_write_input_event(input, IECLASS_RAWKEY, code,
+                         input->qualifier, 0, 0);
+}
+
+static void mr_release_all_input(struct MRInputContext *input)
+{
+    UWORD key;
+
+    for (key = 0; key < 128U; ++key) {
+        if (input->keys[key]) mr_inject_key(input, (UBYTE)key, 0);
+    }
+    if (input->buttons & 1U) mr_inject_button(input, MR_MOUSE_LEFT, 0);
+    if (input->buttons & 2U) mr_inject_button(input, MR_MOUSE_MIDDLE, 0);
+    if (input->buttons & 4U) mr_inject_button(input, MR_MOUSE_RIGHT, 0);
+}
+
+static void mr_input_close(struct MRInputContext *input)
+{
+    if (input->device_open) {
+        mr_release_all_input(input);
+        CloseDevice((struct IORequest *)input->request);
+        input->device_open = 0;
+    }
+    if (input->request) {
+        DeleteIORequest((struct IORequest *)input->request);
+        input->request = NULL;
+    }
+    if (input->port) {
+        DeleteMsgPort(input->port);
+        input->port = NULL;
+    }
 }
 
 static int mr_send_all(LONG sock, const UBYTE *data, ULONG length)
@@ -88,6 +276,85 @@ static int mr_send_handshake(LONG sock, UWORD width, UWORD height,
     mr_put16(hello + 16, MR_PIXEL_PLANAR_INDEXED);
     mr_put16(hello + 18, palette_entries);
     return mr_send_all(sock, hello, sizeof(hello));
+}
+
+static int mr_send_capabilities(LONG sock, UWORD capabilities)
+{
+    UBYTE payload[2];
+
+    mr_put16(payload, capabilities);
+    return mr_send_message_header(sock, MR_MSG_CAPABILITIES, sizeof(payload)) &&
+           mr_send_all(sock, payload, sizeof(payload));
+}
+
+static int mr_socket_readable(LONG sock)
+{
+    fd_set read_fds;
+    struct timeval timeout;
+    LONG ready;
+
+    memset(&timeout, 0, sizeof(timeout));
+    FD_ZERO(&read_fds);
+    FD_SET(sock, &read_fds);
+    ready = WaitSelect(sock + 1, &read_fds, NULL, NULL, &timeout, NULL);
+    return ready > 0 && FD_ISSET(sock, &read_fds);
+}
+
+static int mr_apply_input_message(struct MRInputContext *input,
+                                  struct Screen *screen, UBYTE type,
+                                  const UBYTE *payload, UWORD length)
+{
+    if (type == MR_MSG_MOUSE_MOVE) {
+        if (length != 4U) return 0;
+        mr_inject_pointer(input, screen, mr_get16(payload),
+                          mr_get16(payload + 2));
+    } else if (type == MR_MSG_MOUSE_BUTTON) {
+        if (length != 2U || payload[0] < MR_MOUSE_LEFT ||
+            payload[0] > MR_MOUSE_RIGHT || payload[1] > 1U)
+            return 0;
+        mr_inject_button(input, payload[0], payload[1]);
+    } else if (type == MR_MSG_RAW_KEY) {
+        if (length != 2U || payload[0] >= 128U || payload[1] > 1U)
+            return 0;
+        mr_inject_key(input, payload[0], payload[1]);
+    }
+    return 1;
+}
+
+static int mr_poll_input(LONG sock, struct MRInputContext *input,
+                         struct Screen *screen)
+{
+    LONG received;
+
+    if (!input || !mr_socket_readable(sock)) return 1;
+    if (input->used == MR_INPUT_BUFFER_BYTES) return 0;
+
+    received = recv(sock, (char *)input->buffer + input->used,
+                    MR_INPUT_BUFFER_BYTES - input->used, 0);
+    if (received <= 0) return 0;
+    input->used = (UWORD)(input->used + received);
+
+    while (input->used >= MR_MESSAGE_HEADER_BYTES) {
+        UBYTE type = input->buffer[0];
+        UBYTE flags = input->buffer[1];
+        UWORD length = mr_get16(input->buffer + 2);
+        UWORD total;
+
+        if (flags != 0 || length > MR_INPUT_BUFFER_BYTES -
+            MR_MESSAGE_HEADER_BYTES)
+            return 0;
+        total = (UWORD)(MR_MESSAGE_HEADER_BYTES + length);
+        if (input->used < total) break;
+
+        if (!mr_apply_input_message(input, screen, type,
+                                    input->buffer + MR_MESSAGE_HEADER_BYTES,
+                                    length))
+            return 0;
+        input->used = (UWORD)(input->used - total);
+        if (input->used)
+            memmove(input->buffer, input->buffer + total, input->used);
+    }
+    return 1;
 }
 
 static void mr_capture_palette(struct Screen *screen, UBYTE *rgb,
@@ -191,7 +458,8 @@ static int mr_ctrl_c_pressed(void)
     return (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0;
 }
 
-static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks)
+static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
+                           struct MRInputContext *input)
 {
     struct BitMap *bitmap = screen->RastPort.BitMap;
     UWORD width = (UWORD)screen->Width;
@@ -227,12 +495,14 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks)
         goto done;
     }
 
-    if (!mr_send_handshake(sock, width, height, depth, palette_entries))
+    if (!mr_send_handshake(sock, width, height, depth, palette_entries) ||
+        !mr_send_capabilities(sock, input ? MR_CAP_INPUT : 0))
         goto done;
 
-    printf("Viewer connected: %ux%u, %u bitplanes, %u tiles.\n",
+    printf("Viewer connected: %ux%u, %u bitplanes, %u tiles, input %s.\n",
            (unsigned int)width, (unsigned int)height,
-           (unsigned int)depth, (unsigned int)tile_count);
+           (unsigned int)depth, (unsigned int)tile_count,
+           input ? "enabled" : "disabled");
     connected = 1;
 
     while (!mr_ctrl_c_pressed()) {
@@ -280,7 +550,13 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks)
             printf("Frame %u: %u changed tiles.\n",
                    (unsigned int)frame_id, (unsigned int)changed);
         ++frame_id;
-        Delay(delay_ticks);
+        {
+            ULONG wait_tick;
+            for (wait_tick = 0; wait_tick < delay_ticks; ++wait_tick) {
+                if (!mr_poll_input(sock, input, screen)) goto done;
+                Delay(1);
+            }
+        }
     }
 
 done:
@@ -294,21 +570,38 @@ done:
     return connected;
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
     LONG listen_sock = -1;
     LONG client_sock = -1;
+    LONG args[3] = {0, 0, 0};
+    struct RDArgs *rdargs = NULL;
     struct sockaddr_in address;
     struct Screen *screen = NULL;
+    struct MRInputContext input;
     ULONG port = MR_DEFAULT_PORT;
     ULONG delay_ticks = 5;
     LONG reuse = 1;
+    int enable_input = 0;
     int result = 20;
 
-    if (argc > 1) port = (ULONG)atol(argv[1]);
-    if (argc > 2) delay_ticks = (ULONG)atol(argv[2]);
-    if (port == 0 || port > 65535UL || delay_ticks == 0 || delay_ticks > 250UL) {
-        printf("Usage: MintRemoteServer [port 1-65535] [delay_ticks 1-250]\n");
+    memset(&input, 0, sizeof(input));
+
+    rdargs = ReadArgs((CONST_STRPTR)"PORT/N,DELAY/N,INPUT/S", args, NULL);
+    if (!rdargs) {
+        PrintFault(IoErr(), (CONST_STRPTR)"MintRemoteServer");
+        printf("Usage: MintRemoteServer [PORT] [DELAY] [INPUT]\n");
+        printf("   or: MintRemoteServer PORT=5909 DELAY=5 INPUT\n");
+        return 10;
+    }
+    if (args[0]) port = (ULONG)*(LONG *)args[0];
+    if (args[1]) delay_ticks = (ULONG)*(LONG *)args[1];
+    enable_input = args[2] != 0;
+
+    if (port == 0 || port > 65535UL || delay_ticks == 0 ||
+        delay_ticks > 250UL) {
+        printf("PORT must be 1-65535 and DELAY must be 1-250.\n");
+        FreeArgs(rdargs);
         return 10;
     }
 
@@ -330,20 +623,25 @@ int main(int argc, char **argv)
     if (screen->Width <= 0 || screen->Height <= 0 ||
         screen->RastPort.BitMap->Depth == 0 ||
         screen->RastPort.BitMap->Depth > 8) {
-        printf("PR1 supports native planar Workbench screens up to 8 bitplanes.\n");
+        printf("PR2 supports native planar Workbench screens up to 8 bitplanes.\n");
         goto done;
     }
     if (((struct Library *)GfxBase)->lib_Version >= 39 &&
         !(GetBitMapAttr(screen->RastPort.BitMap, BMA_FLAGS) & BMF_STANDARD)) {
-        printf("PR1 cannot directly read this RTG/non-standard bitmap.\n");
+        printf("PR2 cannot directly read this RTG/non-standard bitmap.\n");
         goto done;
     }
 #ifdef BMF_INTERLEAVED
     if (screen->RastPort.BitMap->Flags & BMF_INTERLEAVED) {
-        printf("PR1 does not yet support interleaved bitmaps.\n");
+        printf("PR2 does not yet support interleaved bitmaps.\n");
         goto done;
     }
 #endif
+
+    if (enable_input && !mr_input_open(&input)) {
+        printf("Could not open input.device for remote control.\n");
+        goto done;
+    }
 
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0) {
@@ -363,23 +661,27 @@ int main(int argc, char **argv)
         goto done;
     }
 
-    printf("MintREMOTE PR1 waiting on TCP port %u. Ctrl-C stops it.\n",
-           (unsigned int)port);
+    printf("MintREMOTE PR2 waiting on TCP port %u (%s). Ctrl-C stops it.\n",
+           (unsigned int)port,
+           enable_input ? "remote input enabled" : "view-only");
     client_sock = accept(listen_sock, NULL, NULL);
     if (client_sock < 0) {
         printf("Accept failed or was interrupted.\n");
         goto done;
     }
 
-    mr_serve_client(client_sock, screen, delay_ticks);
+    mr_serve_client(client_sock, screen, delay_ticks,
+                    enable_input ? &input : NULL);
     result = 0;
 
 done:
     if (client_sock >= 0) CloseSocket(client_sock);
     if (listen_sock >= 0) CloseSocket(listen_sock);
+    mr_input_close(&input);
     if (screen) UnlockPubScreen((UBYTE *)"Workbench", screen);
     if (SocketBase) CloseLibrary(SocketBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);
     if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);
+    if (rdargs) FreeArgs(rdargs);
     return result;
 }
