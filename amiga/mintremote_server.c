@@ -236,9 +236,10 @@ static int mr_send_capabilities(LONG sock, UWORD capabilities)
 static int mr_socket_readable(LONG sock)
 {
     fd_set read_fds;
-    struct timeval timeout = {0, 0};
+    struct timeval timeout;
     LONG ready;
 
+    memset(&timeout, 0, sizeof(timeout));
     FD_ZERO(&read_fds);
     FD_SET(sock, &read_fds);
     ready = WaitSelect(sock + 1, &read_fds, NULL, NULL, &timeout, NULL);
