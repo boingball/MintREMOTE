@@ -6,16 +6,25 @@ import argparse
 from pathlib import Path
 import socket
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "viewer"))
 
 from protocol import (  # noqa: E402
+    CAP_INPUT,
+    MSG_MOUSE_BUTTON,
+    MSG_MOUSE_MOVE,
+    MSG_RAW_KEY,
     encode_indexed_tile,
+    pack_capabilities,
     pack_frame_end,
     pack_handshake,
     pack_palette,
     pack_tile,
+    parse_button_or_key,
+    parse_mouse_move,
+    read_message,
 )
 
 WIDTH = 320
@@ -48,9 +57,28 @@ def make_frame(frame_id: int) -> list[int]:
     return pixels
 
 
+def receive_input(client: socket.socket) -> None:
+    try:
+        while True:
+            msg_type, payload = read_message(client)
+            if msg_type == MSG_MOUSE_MOVE:
+                x, y = parse_mouse_move(payload)
+                print(f"mouse {x},{y}")
+            elif msg_type == MSG_MOUSE_BUTTON:
+                button, down = parse_button_or_key(payload)
+                print(f"mouse button {button} {'down' if down else 'up'}")
+            elif msg_type == MSG_RAW_KEY:
+                raw_key, down = parse_button_or_key(payload)
+                print(f"raw key 0x{raw_key:02x} {'down' if down else 'up'}")
+    except (EOFError, OSError, ValueError):
+        return
+
+
 def serve(client: socket.socket, fps: float) -> None:
     client.sendall(pack_handshake(WIDTH, HEIGHT, TILE_WIDTH, TILE_HEIGHT, DEPTH))
+    client.sendall(pack_capabilities(CAP_INPUT))
     client.sendall(pack_palette(PALETTE))
+    threading.Thread(target=receive_input, args=(client,), daemon=True).start()
     previous: dict[tuple[int, int], bytes] = {}
     frame_id = 1
     while True:
@@ -73,7 +101,7 @@ def serve(client: socket.socket, fps: float) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MintREMOTE PR1 mock server")
+    parser = argparse.ArgumentParser(description="MintREMOTE PR2 mock server")
     parser.add_argument("--port", type=int, default=5909)
     parser.add_argument("--fps", type=float, default=10.0)
     args = parser.parse_args()
@@ -93,4 +121,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
