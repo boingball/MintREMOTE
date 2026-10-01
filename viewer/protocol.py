@@ -45,6 +45,7 @@ class Handshake:
     depth: int
     pixel_format: int
     palette_entries: int
+    version: int = VERSION
 
 
 @dataclass(frozen=True)
@@ -77,13 +78,17 @@ def read_handshake(sock: socket.socket) -> Handshake:
     )
     if magic != MAGIC:
         raise ValueError(f"not a MintREMOTE stream: {magic!r}")
-    if version != VERSION:
+    if version not in (1, VERSION):
         raise ValueError(f"unsupported protocol version {version}")
     if pixel_format != PIXEL_PLANAR_INDEXED:
         raise ValueError(f"unsupported pixel format {pixel_format}")
     if not (1 <= depth <= 8 and entries == 1 << depth):
         raise ValueError("invalid planar depth/palette declaration")
-    return Handshake(width, height, tw, th, depth, pixel_format, entries)
+    if not (0 < width <= 4096 and 0 < height <= 4096 and width * height <= 4194304):
+        raise ValueError("invalid or excessive screen dimensions")
+    if not (0 < tw <= width and 0 < th <= height):
+        raise ValueError("invalid tile dimensions")
+    return Handshake(width, height, tw, th, depth, pixel_format, entries, version)
 
 
 def read_message(sock: socket.socket) -> tuple[int, bytes]:
@@ -112,6 +117,10 @@ def parse_tile(payload: bytes) -> Tile:
     if reserved != 0:
         raise ValueError("unsupported tile flags")
     data = payload[TILE_HEADER.size :]
+    if not (width > 0 and height > 0 and 1 <= depth <= 8):
+        raise ValueError("invalid tile dimensions/depth")
+    if row_bytes < (width + 7) // 8:
+        raise ValueError("tile row is too short")
     if len(data) != row_bytes * height * depth:
         raise ValueError("tile planar data length mismatch")
     return Tile(frame_id, x, y, width, height, row_bytes, depth, data)
@@ -144,6 +153,17 @@ def parse_button_or_key(payload: bytes) -> tuple[int, bool]:
     return code, bool(down)
 
 
+def validate_tile(tile: Tile, screen_width: int, screen_height: int) -> None:
+    if not (tile.x >= 0 and tile.y >= 0 and tile.width > 0 and tile.height > 0):
+        raise ValueError("invalid tile coordinates/dimensions")
+    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
+        raise ValueError("tile lies outside framebuffer")
+    if not 1 <= tile.depth <= 8 or tile.row_bytes < (tile.width + 7) // 8:
+        raise ValueError("invalid tile planar layout")
+    if len(tile.data) != tile.row_bytes * tile.height * tile.depth:
+        raise ValueError("tile planar data length mismatch")
+
+
 def apply_planar_tile(
     framebuffer: bytearray,
     screen_width: int,
@@ -151,10 +171,7 @@ def apply_planar_tile(
     palette: Sequence[tuple[int, int, int]],
     tile: Tile,
 ) -> None:
-    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
-        raise ValueError("tile lies outside framebuffer")
-    if tile.depth < 1 or tile.depth > 8:
-        raise ValueError("unsupported tile depth")
+    validate_tile(tile, screen_width, screen_height)
 
     plane_stride = tile.row_bytes * tile.height
     for row in range(tile.height):
@@ -183,10 +200,7 @@ def apply_planar_tile_indices(
     message immediately recolours unchanged pixels, as real Amiga hardware
     does, without forcing the server to resend every tile.
     """
-    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
-        raise ValueError("tile lies outside framebuffer")
-    if tile.depth < 1 or tile.depth > 8:
-        raise ValueError("unsupported tile depth")
+    validate_tile(tile, screen_width, screen_height)
 
     plane_stride = tile.row_bytes * tile.height
     for row in range(tile.height):
@@ -207,11 +221,12 @@ def pack_message(msg_type: int, payload: bytes) -> bytes:
 
 
 def pack_handshake(
-    width: int, height: int, tile_width: int, tile_height: int, depth: int
+    width: int, height: int, tile_width: int, tile_height: int, depth: int,
+    version: int = VERSION,
 ) -> bytes:
     return HANDSHAKE.pack(
         MAGIC,
-        VERSION,
+        version,
         width,
         height,
         tile_width,

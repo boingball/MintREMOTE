@@ -4,9 +4,9 @@ Remote viewing and control for classic Amigas, designed around the formats the
 Amiga can produce cheaply rather than making a 68k machine behave like a
 modern video encoder.
 
-## PR2 prototype
+## Capture and remote input
 
-The first prototype proves one path end-to-end:
+The server and client use this path:
 
 1. `MintRemoteServer` locks the public Workbench screen.
 2. It reads a native ECS/AGA planar bitmap in 32x16 pixel tiles.
@@ -71,19 +71,34 @@ Requirements:
 - A native planar Workbench screen
 - TCP/IP stack providing `bsdsocket.library` v4+
 
-## Run the Windows viewer
+## Windows desktop client
 
 Install Python 3 and Pillow:
 
 ```powershell
 py -m pip install -r viewer/requirements.txt
-py viewer/mintremote_viewer.py 192.168.1.50
+py viewer/mintremote_viewer.py
 ```
 
-Use the Amiga's IP address. The viewer defaults to TCP port 5909.
-Click inside the remote screen to give it keyboard focus. Moving over the
-screen controls the Amiga pointer. Losing focus or closing the viewer releases
-held remote keys and buttons.
+Enter the Amiga's IP address and click **Connect**. The client remembers the
+address, port and display scale. It offers fit-to-window or 1x–4x scaling,
+fullscreen (F11), native-resolution PNG screenshots and reconnecting without
+restarting the app. F12 releases remote input and returns focus to the PC.
+
+For a standalone **MintREMOTE.exe** with no Python installation required,
+download the `MintREMOTE-Windows-x64` artifact from the **Windows client**
+GitHub Actions run for this branch. You can also build it locally:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_windows.ps1
+```
+
+The output is `dist/MintREMOTE.exe`. See [Windows client guide](docs/WINDOWS_CLIENT.md).
+
+The client accepts both protocol v1 (the original view-only server) and
+protocol v2 from [PR #2](https://github.com/boingball/MintREMOTE/pull/2).
+Mouse/keyboard control is available when the v2 server advertises input
+support, started with `MintRemoteServer 5909 5 INPUT`.
 
 The viewer can be tested before using an Amiga:
 

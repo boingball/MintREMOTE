@@ -74,9 +74,10 @@ def receive_input(client: socket.socket) -> None:
         return
 
 
-def serve(client: socket.socket, fps: float) -> None:
-    client.sendall(pack_handshake(WIDTH, HEIGHT, TILE_WIDTH, TILE_HEIGHT, DEPTH))
-    client.sendall(pack_capabilities(CAP_INPUT))
+def serve(client: socket.socket, fps: float, version: int = 2, input_enabled: bool = True) -> None:
+    client.sendall(pack_handshake(WIDTH, HEIGHT, TILE_WIDTH, TILE_HEIGHT, DEPTH, version=version))
+    if version >= 2:
+        client.sendall(pack_capabilities(CAP_INPUT if input_enabled else 0))
     client.sendall(pack_palette(PALETTE))
     threading.Thread(target=receive_input, args=(client,), daemon=True).start()
     previous: dict[tuple[int, int], bytes] = {}
@@ -101,22 +102,27 @@ def serve(client: socket.socket, fps: float) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MintREMOTE PR2 mock server")
+    parser = argparse.ArgumentParser(description="MintREMOTE mock server (v1 or v2)")
     parser.add_argument("--port", type=int, default=5909)
     parser.add_argument("--fps", type=float, default=10.0)
+    parser.add_argument("--version", type=int, choices=(1, 2), default=2)
+    parser.add_argument("--view-only", action="store_true")
     args = parser.parse_args()
+    if args.fps <= 0:
+        parser.error("fps must be positive")
     with socket.socket() as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind(("127.0.0.1", args.port))
         server.listen(1)
         print(f"Mock server waiting on 127.0.0.1:{args.port}")
-        client, address = server.accept()
-        with client:
-            print(f"Viewer connected from {address[0]}:{address[1]}")
-            try:
-                serve(client, args.fps)
-            except (BrokenPipeError, ConnectionResetError):
-                print("Viewer disconnected")
+        while True:
+            client, address = server.accept()
+            with client:
+                print(f"Viewer connected from {address[0]}:{address[1]}")
+                try:
+                    serve(client, args.fps, args.version, not args.view_only)
+                except OSError:
+                    print("Viewer disconnected")
 
 
 if __name__ == "__main__":

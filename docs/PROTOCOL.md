@@ -108,3 +108,12 @@ keymap remains authoritative.
 The protocol still has no compression, authentication, encryption,
 acknowledgements, clipboard transfer or screen-mode-change message. It must be
 used only on a trusted LAN. Remote input is an explicit server-side option.
+
+## Desktop compatibility with version 1
+
+The desktop client also accepts the original protocol v1 handshake and display
+messages. Version 1 is always view-only: no input packets are sent.
+
+The client rejects excessive screen sizes (over 4096 in either dimension or
+4,194,304 pixels), invalid row lengths, out-of-bounds tiles and tiles whose
+depth differs from the handshake.
