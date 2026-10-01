@@ -166,7 +166,11 @@ class SessionTests(unittest.TestCase):
         def server(client):
             client.sendall(pack_handshake(8, 1, 8, 1, 1) + b'\x01')
             sent.set()
-            self.assertEqual(client.recv(1), b'')
+            try:
+                self.assertEqual(client.recv(1), b'')
+            except ConnectionResetError:
+                # Windows may reset TCP when cancelling an unread partial packet.
+                pass
         session, thread, errors = self.start_server(server)
         self.assertTrue(sent.wait(3))
         session.close()
