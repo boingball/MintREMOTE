@@ -2,6 +2,29 @@
 #include <assert.h>
 #include <string.h>
 #include "mintremote_io.h"
+#include "mintremote_addresses.h"
+
+static void test_addresses(void)
+{
+    unsigned char record[48] = {0};
+    unsigned long step = 0, address = 0;
+    record[17] = 2;
+    record[20] = 192; record[21] = 168; record[22] = 1; record[23] = 42;
+    assert(mr_read_interface_ipv4(record, 32, &step, &address) == 1);
+    assert(step == 32 && address == 0xc0a8012aUL);
+    record[16] = 16; /* Modern BSD sockaddr length/family. */
+    assert(mr_read_interface_ipv4(record, 32, &step, &address) == 1);
+    assert(step == 32 && address == 0xc0a8012aUL);
+    record[16] = 32; record[17] = 18; /* Extended link-layer address. */
+    assert(mr_read_interface_ipv4(record, 48, &step, &address) == 0);
+    assert(step == 48);
+    assert(mr_read_interface_ipv4(record, 40, &step, &address) == -1);
+    assert(mr_read_interface_ipv4(record, 31, &step, &address) == -1);
+    record[16] = 16; record[17] = 2; record[20] = 127;
+    assert(mr_read_interface_ipv4(record, 32, &step, &address) == 0);
+    memset(record + 20, 0, 4);
+    assert(mr_read_interface_ipv4(record, 32, &step, &address) == 0);
+}
 
 struct Fake {
     unsigned char output[40000];
@@ -73,5 +96,6 @@ int main(void)
     fake.stopped = 1;
     assert(!mr_write_all(&ops, source, sizeof(source)));
     assert(fake.calls == 0);
+    test_addresses();
     return 0;
 }

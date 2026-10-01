@@ -34,3 +34,5 @@ Host tests exercise the same send loop used by the server: partial writes,
 would-block retry, interrupted writes, peer closure, fatal errors, and quitting
 during a writable-socket wait. GadTools drawing and socket-stack integration
 still need the above Amiga hardware/emulator checks.
+The tests also decode old and BSD IPv4 interface records, skip extended
+non-IPv4 records, and reject truncated, unspecified and loopback addresses.

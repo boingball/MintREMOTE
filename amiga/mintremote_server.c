@@ -35,6 +35,7 @@
 #include "mintremote_protocol.h"
 #include "mintremote_gui.h"
 #include "mintremote_io.h"
+#include "mintremote_addresses.h"
 
 struct Library *SocketBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
@@ -652,29 +653,23 @@ static UWORD mr_local_addresses(LONG sock, ULONG port,
            count < MR_MAX_ADDRESSES) {
         struct ifreq *entry = (struct ifreq *)(buffer + offset);
         struct ifreq flags;
-        struct sockaddr_in *ip = (struct sockaddr_in *)&entry->ifr_addr;
-        /* Reading the first byte supports both sockaddr layouts in Amiga SDKs:
-         * BSD sa_len/sa_family, and the earlier 16-bit sa_family (big endian).
-         */
-        ULONG address_length = ((UBYTE *)&entry->ifr_addr)[0];
-        ULONG record_length = IFNAMSIZ +
-            (address_length > sizeof(struct sockaddr) ? address_length :
-             sizeof(struct sockaddr));
-        ULONG host;
+        unsigned long record_length, host;
+        int usable;
         UWORD i;
         char text[MR_ADDRESS_TEXT_BYTES];
-        if (record_length > (ULONG)(config.ifc_len - offset)) break;
+        usable = mr_read_interface_ipv4(buffer + offset,
+                    (ULONG)(config.ifc_len - offset), &record_length, &host);
+        if (usable < 0) break;
         offset += record_length;
-        if (entry->ifr_addr.sa_family != AF_INET) continue;
-        host = ntohl(ip->sin_addr.s_addr);
-        if (!host || (host >> 24) == 127) continue;
+        if (!usable) continue;
         memset(&flags, 0, sizeof(flags));
         memcpy(flags.ifr_name, entry->ifr_name, IFNAMSIZ);
         if (IoctlSocket(sock, SIOCGIFFLAGS, (char *)&flags) == 0 &&
             (!(flags.ifr_flags & IFF_UP) || (flags.ifr_flags & IFF_LOOPBACK)))
             continue;
         sprintf(text, "IP: %lu.%lu.%lu.%lu:%lu", (host >> 24) & 255UL,
-                 (host >> 16) & 255UL, (host >> 8) & 255UL, host & 255UL, port);
+                 (host >> 16) & 255UL, (host >> 8) & 255UL, host & 255UL,
+                 (unsigned long)port);
         for (i = 0; i < count; ++i)
             if (strcmp(addresses[i], text) == 0) break;
         if (i == count) strcpy(addresses[count++], text);
