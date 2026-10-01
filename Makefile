@@ -7,8 +7,8 @@ CFLAGS  ?= -Os -m68000 -Wall -Wextra -fomit-frame-pointer -fno-builtin
 
 all: MintRemoteServer
 
-MintRemoteServer: amiga/mintremote_server.c amiga/mintremote_protocol.h
-	$(CC) $(CFLAGS) -Iamiga -o $@ amiga/mintremote_server.c -lamiga
+MintRemoteServer: amiga/mintremote_server.c amiga/mintremote_gui.c amiga/mintremote_gui.h amiga/mintremote_io.h amiga/mintremote_addresses.h amiga/mintremote_protocol.h
+	$(CC) $(CFLAGS) -Iamiga -o $@ amiga/mintremote_server.c amiga/mintremote_gui.c -lamiga
 
 check:
 	$(PYTHON) -m unittest discover -s tests -v
@@ -16,4 +16,3 @@ check:
 clean:
 	rm -f MintRemoteServer
 	rm -rf viewer/__pycache__ tests/__pycache__ tools/__pycache__
-
