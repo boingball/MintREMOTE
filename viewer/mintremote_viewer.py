@@ -297,7 +297,7 @@ class MintRemoteViewer:
 
     def release_focus(self, _event=None) -> str:
         self.release_all_input()
-        self.connect_button.focus_set()
+        self.root.focus_set()
         return "break"
 
     def control_changed(self) -> None:

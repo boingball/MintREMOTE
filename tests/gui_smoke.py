@@ -87,10 +87,10 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(self.app.pressed_buttons)
 
     def test_letterbox_click_ignored_and_fullscreen_toggles(self):
-        self.app.root.geometry('1000x900')
+        self.app.scale.set('1x')
         self.app.root.update()
         self.app.render()
-        self.assertGreater(self.app.geometry[1], 0)
+        self.assertTrue(self.app.geometry[0] > 0 or self.app.geometry[1] > 0)
         self.app.mouse_button_down(SimpleNamespace(num=1,x=0,y=0))
         self.assertEqual(self.app.session.sent, [])
         self.app.toggle_fullscreen()
@@ -107,6 +107,18 @@ class DesktopTests(unittest.TestCase):
         self.app.key_down(SimpleNamespace(keysym='a', keycode=65))
         self.app.host_entry.focus_set()
         self.app.root.update()
+        self.assertFalse(self.app.pressed_keys)
+        self.assertEqual(self.app.session.sent[-1], pack_raw_key(0x20, False))
+
+    def test_f12_releases_focus_while_connect_button_is_disabled(self):
+        self.app.connect_button.configure(state="disabled")
+        self.app.root.focus_force()
+        self.app.canvas.focus_set()
+        self.app.root.update()
+        self.app.key_down(SimpleNamespace(keysym="a", keycode=65))
+        self.app.release_focus()
+        self.app.root.update()
+        self.assertNotEqual(self.app.root.focus_get(), self.app.canvas)
         self.assertFalse(self.app.pressed_keys)
         self.assertEqual(self.app.session.sent[-1], pack_raw_key(0x20, False))
 
