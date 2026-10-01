@@ -5,14 +5,18 @@ CFLAGS  ?= -Os -m68000 -Wall -Wextra -fomit-frame-pointer -fno-builtin
 
 .PHONY: all check clean
 
-all: MintRemoteServer
+all: MintRemoteServer MintRemoteServer.info
 
 MintRemoteServer: amiga/mintremote_server.c amiga/mintremote_gui.c amiga/mintremote_gui.h amiga/mintremote_io.h amiga/mintremote_addresses.h amiga/mintremote_protocol.h
 	$(CC) $(CFLAGS) -Iamiga -o $@ amiga/mintremote_server.c amiga/mintremote_gui.c -lamiga
+
+# Workbench icon (regenerate the source copy with tools/make_icon.py).
+MintRemoteServer.info: amiga/MintRemoteServer.info
+	cp amiga/MintRemoteServer.info $@
 
 check:
 	$(PYTHON) -m unittest discover -s tests -v
 
 clean:
-	rm -f MintRemoteServer
+	rm -f MintRemoteServer MintRemoteServer.info
 	rm -rf viewer/__pycache__ tests/__pycache__ tools/__pycache__

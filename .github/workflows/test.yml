@@ -24,10 +24,12 @@ jobs:
             sacredbanana/amiga-compiler:m68k-amigaos \
             bash -c 'set -e; m68k-amigaos-gcc --version | head -1; make'
       - name: Confirm the Amiga executable was produced
-        run: test -f MintRemoteServer
+        run: test -f MintRemoteServer && test -f MintRemoteServer.info
       - name: Publish the AmigaOS prototype
         uses: actions/upload-artifact@v4
         with:
           name: MintRemoteServer-AmigaOS
-          path: MintRemoteServer
+          path: |
+            MintRemoteServer
+            MintRemoteServer.info
           if-no-files-found: error
