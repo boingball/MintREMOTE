@@ -6,7 +6,7 @@
 2. Open `MintREMOTE.exe`, enter the Amiga IP address or hostname, and click **Connect**.
 3. Use **Disconnect**, then **Connect** to reconnect or change the target.
 
-The current `main` Amiga server is view-only. For mouse and keyboard control,
+The original protocol v1 Amiga server is view-only. For mouse and keyboard control,
 use the protocol v2 server from PR #2 and start it with:
 
 ```text

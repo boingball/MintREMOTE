@@ -167,21 +167,23 @@ class DesktopConnectionTests(unittest.TestCase):
             except Exception as exc:
                 errors.append(exc)
         thread = threading.Thread(target=serve,daemon=True)
-        thread.start()
         with patch('mintremote_viewer.load_settings',return_value={}):
             app=MintRemoteViewer()
         self.addCleanup(app.close)
+        # First-time Tk setup on Windows may take longer than the mock server
+        # accept timeout. Start accepting only after the window exists.
+        thread.start()
         app.host.set('127.0.0.1')
         app.port.set(str(server.getsockname()[1]))
         app.poll_after=app.root.after(15,app.poll_events)
         def pump(predicate):
-            deadline=time.monotonic()+4
+            deadline=time.monotonic()+10
             while time.monotonic()<deadline:
                 app.root.update()
                 if predicate():
                     return
                 time.sleep(.005)
-            self.fail('desktop session did not reach expected state')
+            self.fail(f'desktop session did not reach expected state: {app.status.get()}; server errors: {errors}')
         with patch('mintremote_viewer.save_settings'):
             app.connect()
             pump(lambda: app.image is not None)

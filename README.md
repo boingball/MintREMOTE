@@ -4,14 +4,16 @@ Remote viewing and control for classic Amigas, designed around the formats the
 Amiga can produce cheaply rather than making a 68k machine behave like a
 modern video encoder.
 
-## PR1 prototype
+## Capture and remote input
 
-The first prototype proves one path end-to-end:
+The server and client use this path:
 
 1. `MintRemoteServer` locks the public Workbench screen.
 2. It reads a native ECS/AGA planar bitmap in 32x16 pixel tiles.
 3. Only tiles that differ from the last transmitted copy are sent over TCP.
 4. The Python viewer reconstructs the bitplanes and palette on Windows.
+5. When explicitly enabled, mouse and keyboard messages travel back to the
+   Amiga and are injected through `input.device`.
 
 The PC does the planar-to-RGB conversion. The Amiga only compares and copies
 the bitplane bytes it already owns.
@@ -20,7 +22,8 @@ the bitplane bytes it already owns.
 
 - Native planar Workbench screens only, from 1 to 8 bitplanes.
 - One viewer at a time.
-- View-only: keyboard and mouse return traffic is deliberately deferred.
+- Standard mouse buttons, pointer movement and the common Amiga keyboard keys
+  are supported; mouse wheel and unusual multimedia keys are not mapped yet.
 - No compression, encryption or authentication yet.
 - Screen-mode changes require reconnecting/restarting the prototype.
 - This is for trusted LAN testing only. Do not expose TCP port 5909 to the
@@ -44,12 +47,23 @@ make CROSS=/opt/amiga13/m68k-amigaos/bin/m68k-amigaos-
 Copy `MintRemoteServer` to the Amiga and run:
 
 ```text
-MintRemoteServer [port] [delay_ticks]
-MintRemoteServer 5909 5
+MintRemoteServer [port] [delay_ticks] [INPUT]
+MintRemoteServer 5909 5 INPUT
+```
+
+Arguments use the normal AmigaDOS `ReadArgs` template
+`PORT/N,DELAY/N,INPUT/S`. The switch can therefore be used on its own or with
+named values:
+
+```text
+MintRemoteServer INPUT
+MintRemoteServer PORT=5909 DELAY=5 INPUT
 ```
 
 `delay_ticks` is the pause between scans in Amiga ticks (normally 50 ticks per
 second). Five ticks targets roughly ten scans per second without busy-looping.
+Input is polled once per tick so it remains responsive independently of the
+screen scan rate. Omit `INPUT` for a view-only server.
 
 Requirements:
 
@@ -81,11 +95,10 @@ powershell -ExecutionPolicy Bypass -File tools/build_windows.ps1
 
 The output is `dist/MintREMOTE.exe`. See [Windows client guide](docs/WINDOWS_CLIENT.md).
 
-The client accepts both protocol v1 (current `main` server, view only) and
+The client accepts both protocol v1 (the original view-only server) and
 protocol v2 from [PR #2](https://github.com/boingball/MintREMOTE/pull/2).
-Mouse/keyboard control is available only when that server advertises input
-support, started with `MintRemoteServer 5909 5 INPUT`. The Amiga source is
-unchanged by the desktop client work.
+Mouse/keyboard control is available when the v2 server advertises input
+support, started with `MintRemoteServer 5909 5 INPUT`.
 
 The viewer can be tested before using an Amiga:
 
@@ -104,10 +117,10 @@ The host-side tests verify protocol framing, planar tile packing and decoding.
 The Amiga executable still needs a Bebbo cross-toolchain and real-hardware or
 emulator testing.
 
-See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the PR1 wire format and
-[docs/PR1_TEST_PLAN.md](docs/PR1_TEST_PLAN.md) for the first hardware tests.
+See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format,
+[docs/PR1_TEST_PLAN.md](docs/PR1_TEST_PLAN.md) for the capture tests and
+[docs/PR2_TEST_PLAN.md](docs/PR2_TEST_PLAN.md) for remote-input tests.
 
 ## License
 
 MIT - Copyright (c) 2026 Darren Banfi.
-
