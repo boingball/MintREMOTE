@@ -4,6 +4,9 @@
  * Captures the public Workbench screen as native bitplane tiles and sends
  * only changed tiles to a single TCP client. The PC performs all planar to
  * RGB conversion. Optional client input is injected through input.device.
+ *
+ * Started from Workbench, options come from the icon's ToolTypes and nothing
+ * is written to a console: the GadTools window is the whole interface.
  */
 
 #include <exec/types.h>
@@ -13,6 +16,8 @@
 #include <devices/input.h>
 #include <devices/inputevent.h>
 #include <dos/dos.h>
+#include <workbench/startup.h>
+#include <workbench/workbench.h>
 #include <intuition/intuition.h>
 #include <graphics/gfx.h>
 #include <graphics/gfxbase.h>
@@ -21,15 +26,19 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#include <proto/icon.h>
 #include <sys/types.h>
 #include <proto/bsdsocket.h>
+#include <libraries/bsdsocket.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "mintremote_protocol.h"
@@ -40,6 +49,34 @@
 struct Library *SocketBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
+struct Library *IconBase = NULL;
+extern struct WBStartup *_WBenchMsg;
+
+/* Workbench processes have no console; report through requesters instead. */
+static int from_workbench;
+
+static void mr_log(const char *format, ...)
+{
+    va_list args;
+    if (from_workbench) return;
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+}
+
+static void mr_error(const char *format, ...)
+{
+    char text[160];
+    va_list args;
+    va_start(args, format);
+    vsprintf(text, format, args);
+    va_end(args);
+    if (from_workbench) {
+        if (IntuitionBase) mr_gui_message(text);
+    } else {
+        printf("%s\n", text);
+    }
+}
 
 #define MR_INPUT_BUFFER_BYTES 512
 
@@ -240,21 +277,38 @@ static void mr_input_close(struct MRInputContext *input)
     }
 }
 
-/* Latch quit requests, including those consumed by WaitSelect. */
-static int stop_requested;
+/* Latch quit and disconnect requests, including those consumed by WaitSelect.
+ * Ctrl-C is handled here: main() clears bsdsocket's own break mask so the
+ * stack cannot swallow the signal as a silent EINTR.
+ */
+static int stop_requested, drop_requested;
+
+static void mr_poll_events(void)
+{
+    ULONG events = mr_gui_poll();
+    if (events & MR_GUI_QUIT) stop_requested = 1;
+    if (events & MR_GUI_DISCONNECT) drop_requested = 1;
+    if (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C)
+        stop_requested = 1;
+}
 
 static int mr_should_stop(void)
 {
-    if (mr_gui_poll() ||
-        (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C))
-        stop_requested = 1;
+    mr_poll_events();
     return stop_requested;
 }
 
-/* Socket waits also wake for Intuition messages. All sockets are nonblocking. */
-static int mr_wait_socket(LONG sock, int writing)
+/* Stop serving the current viewer: quit, or Disconnect in the window. */
+static int mr_client_done(void)
 {
-    while (!mr_should_stop()) {
+    mr_poll_events();
+    return stop_requested || drop_requested;
+}
+
+/* Socket waits also wake for Intuition messages. All sockets are nonblocking. */
+static int mr_wait_socket(LONG sock, int writing, int (*done)(void))
+{
+    while (!done()) {
         fd_set fds;
         struct timeval timeout;
         ULONG signals = mr_gui_signal() | SIGBREAKF_CTRL_C;
@@ -266,7 +320,7 @@ static int mr_wait_socket(LONG sock, int writing)
         ready = WaitSelect(sock + 1, writing ? NULL : &fds,
                             writing ? &fds : NULL, NULL, &timeout, &signals);
         if (signals & SIGBREAKF_CTRL_C) stop_requested = 1;
-        if (mr_should_stop()) return 0;
+        if (done()) return 0;
         if (ready > 0 && FD_ISSET(sock, &fds)) return 1;
         if (ready < 0 && Errno() != EINTR) return 0;
     }
@@ -290,13 +344,13 @@ static int mr_write_error(void *context)
 
 static int mr_write_wait(void *context)
 {
-    return mr_wait_socket(*(LONG *)context, 1);
+    return mr_wait_socket(*(LONG *)context, 1, mr_client_done);
 }
 
 static int mr_write_stopped(void *context)
 {
     (void)context;
-    return mr_should_stop();
+    return mr_client_done();
 }
 
 static int mr_send_all(LONG sock, const UBYTE *data, ULONG length)
@@ -552,7 +606,7 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
                               MEMF_PUBLIC);
 
     if (!previous || !valid || !tile || !palette || !old_palette || !rgb32) {
-        printf("Not enough memory for capture buffers.\n");
+        mr_error("Not enough memory for capture buffers.");
         goto done;
     }
 
@@ -560,13 +614,13 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
         !mr_send_capabilities(sock, input ? MR_CAP_INPUT : 0))
         goto done;
 
-    printf("Viewer connected: %ux%u, %u bitplanes, %u tiles, input %s.\n",
+    mr_log("Viewer connected: %ux%u, %u bitplanes, %u tiles, input %s.\n",
            (unsigned int)width, (unsigned int)height,
            (unsigned int)depth, (unsigned int)tile_count,
            input ? "enabled" : "disabled");
     connected = 1;
 
-    while (!mr_should_stop()) {
+    while (!mr_client_done()) {
         UWORD ty;
         UWORD changed = 0;
 
@@ -579,7 +633,7 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
 
         for (ty = 0; ty < tiles_y; ++ty) {
             UWORD tx;
-            if (mr_should_stop()) goto done;
+            if (mr_client_done()) goto done;
             for (tx = 0; tx < tiles_x; ++tx) {
                 UWORD x = (UWORD)(tx * MR_TILE_WIDTH);
                 UWORD y = (UWORD)(ty * MR_TILE_HEIGHT);
@@ -608,14 +662,11 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
 
         if (!mr_send_frame_end(sock, frame_id, changed)) break;
 
-        if ((frame_id % 50UL) == 0)
-            printf("Frame %u: %u changed tiles.\n",
-                   (unsigned int)frame_id, (unsigned int)changed);
         ++frame_id;
         {
             ULONG wait_tick;
             for (wait_tick = 0; wait_tick < delay_ticks; ++wait_tick) {
-                if (mr_should_stop() ||
+                if (mr_client_done() ||
                     !mr_poll_input(sock, input, screen)) goto done;
                 Delay(1);
             }
@@ -629,7 +680,7 @@ done:
     if (tile) FreeVec(tile);
     if (valid) FreeVec(valid);
     if (previous) FreeVec(previous);
-    if (connected) printf("Viewer disconnected.\n");
+    if (connected) mr_log("Viewer disconnected.\n");
     return connected;
 }
 
@@ -684,85 +735,167 @@ unavailable:
     return count;
 }
 
+/* Workbench ToolTypes mirror the Shell template: PORT=5909, DELAY=5, INPUT.
+ * A parenthesised entry such as (INPUT) is disabled, as usual on Workbench.
+ */
+static int mr_parse_number(const char *text, ULONG *value)
+{
+    char *end;
+    unsigned long parsed;
+    if (!*text) return 0;
+    parsed = strtoul(text, &end, 10);
+    if (*end) return 0;
+    *value = parsed;
+    return 1;
+}
+
+static int mr_read_tooltypes(struct WBStartup *startup, ULONG *port,
+                             ULONG *delay_ticks, int *enable_input)
+{
+    struct WBArg *arg = startup->sm_ArgList;
+    struct DiskObject *icon;
+    BPTR old_dir;
+    int ok = 1;
+
+    IconBase = OpenLibrary((CONST_STRPTR)"icon.library", 36);
+    if (!IconBase) return 1; /* Defaults still give a working server. */
+    old_dir = CurrentDir(arg->wa_Lock);
+    icon = GetDiskObject(arg->wa_Name);
+    CurrentDir(old_dir);
+    if (icon) {
+        CONST_STRPTR *types = (CONST_STRPTR *)icon->do_ToolTypes;
+        STRPTR value;
+        if ((value = FindToolType(types, (CONST_STRPTR)"PORT")) != NULL &&
+            !mr_parse_number((const char *)value, port)) ok = 0;
+        if ((value = FindToolType(types, (CONST_STRPTR)"DELAY")) != NULL &&
+            !mr_parse_number((const char *)value, delay_ticks)) ok = 0;
+        if ((value = FindToolType(types, (CONST_STRPTR)"INPUT")) != NULL)
+            *enable_input = !MatchToolValue(value, (CONST_STRPTR)"NO") &&
+                            !MatchToolValue(value, (CONST_STRPTR)"OFF") &&
+                            !MatchToolValue(value, (CONST_STRPTR)"FALSE");
+        FreeDiskObject(icon);
+    }
+    CloseLibrary(IconBase);
+    IconBase = NULL;
+    return ok;
+}
+
+static void mr_format_ipv4(char *text, const UBYTE *bytes)
+{
+    sprintf(text, "%u.%u.%u.%u", (unsigned int)bytes[0],
+            (unsigned int)bytes[1], (unsigned int)bytes[2],
+            (unsigned int)bytes[3]);
+}
+
 int main(void)
 {
     LONG listen_sock = -1;
     LONG client_sock = -1;
     LONG args[3] = {0, 0, 0};
     struct RDArgs *rdargs = NULL;
-    struct sockaddr_in address;
+    struct sockaddr_in address, peer;
     struct Screen *screen = NULL;
     struct MRInputContext input;
+    struct TagItem socket_tags[2];
     ULONG port = MR_DEFAULT_PORT;
     ULONG delay_ticks = 5;
     LONG reuse = 1;
     LONG nonblocking = 1;
+    socklen_t peer_length;
     char addresses[MR_MAX_ADDRESSES][MR_ADDRESS_TEXT_BYTES];
+    char screen_text[MR_ADDRESS_TEXT_BYTES];
+    char peer_text[16];
     UWORD address_count, i;
     int enable_input = 0;
     int result = 20;
 
     memset(&input, 0, sizeof(input));
-
-    rdargs = ReadArgs((CONST_STRPTR)"PORT/N,DELAY/N,INPUT/S", args, NULL);
-    if (!rdargs) {
-        PrintFault(IoErr(), (CONST_STRPTR)"MintRemoteServer");
-        printf("Usage: MintRemoteServer [PORT] [DELAY] [INPUT]\n");
-        printf("   or: MintRemoteServer PORT=5909 DELAY=5 INPUT\n");
-        return 10;
-    }
-    if (args[0]) port = (ULONG)*(LONG *)args[0];
-    if (args[1]) delay_ticks = (ULONG)*(LONG *)args[1];
-    enable_input = args[2] != 0;
-
-    if (port == 0 || port > 65535UL || delay_ticks == 0 ||
-        delay_ticks > 250UL) {
-        printf("PORT must be 1-65535 and DELAY must be 1-250.\n");
-        FreeArgs(rdargs);
-        return 10;
-    }
+    from_workbench = _WBenchMsg != NULL;
 
     IntuitionBase = (struct IntuitionBase *)OpenLibrary(
         (CONST_STRPTR)"intuition.library", 39);
     GfxBase = (struct GfxBase *)OpenLibrary(
         (CONST_STRPTR)"graphics.library", 39);
-    SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
-    if (!IntuitionBase || !GfxBase || !SocketBase) {
-        printf("MintREMOTE requires intuition/graphics v39 and bsdsocket v4.\n");
+
+    if (from_workbench) {
+        if (IntuitionBase &&
+            !mr_read_tooltypes(_WBenchMsg, &port, &delay_ticks,
+                               &enable_input)) {
+            mr_error("Invalid PORT or DELAY ToolType in the icon.");
+            result = 10;
+            goto done;
+        }
+    } else {
+        rdargs = ReadArgs((CONST_STRPTR)"PORT/N,DELAY/N,INPUT/S", args, NULL);
+        if (!rdargs) {
+            PrintFault(IoErr(), (CONST_STRPTR)"MintRemoteServer");
+            printf("Usage: MintRemoteServer [PORT] [DELAY] [INPUT]\n");
+            printf("   or: MintRemoteServer PORT=5909 DELAY=5 INPUT\n");
+            result = 10;
+            goto done;
+        }
+        if (args[0]) port = (ULONG)*(LONG *)args[0];
+        if (args[1]) delay_ticks = (ULONG)*(LONG *)args[1];
+        enable_input = args[2] != 0;
+    }
+
+    if (!IntuitionBase || !GfxBase) {
+        /* No requester is possible without intuition v39. */
+        mr_log("MintREMOTE requires AmigaOS 3.0 (intuition/graphics v39).\n");
+        goto done;
+    }
+    if (port == 0 || port > 65535UL || delay_ticks == 0 ||
+        delay_ticks > 250UL) {
+        mr_error("PORT must be 1-65535 and DELAY must be 1-250.");
+        result = 10;
         goto done;
     }
 
+    SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
+    if (!SocketBase) {
+        mr_error("Could not open bsdsocket.library.\n"
+                 "Start your TCP/IP stack (e.g. Roadshow or Miami) first.");
+        goto done;
+    }
+    /* Ctrl-C is ours; otherwise the stack eats it as EINTR mid-call. */
+    socket_tags[0].ti_Tag = SBTM_SETVAL(SBTC_BREAKMASK);
+    socket_tags[0].ti_Data = 0;
+    socket_tags[1].ti_Tag = TAG_END;
+    socket_tags[1].ti_Data = 0;
+    SocketBaseTagList(socket_tags);
+
     screen = LockPubScreen((UBYTE *)"Workbench");
     if (!screen || !screen->RastPort.BitMap) {
-        printf("Could not lock the public Workbench screen.\n");
+        mr_error("Could not lock the public Workbench screen.");
         goto done;
     }
     if (screen->Width <= 0 || screen->Height <= 0 ||
         screen->RastPort.BitMap->Depth == 0 ||
         screen->RastPort.BitMap->Depth > 8) {
-        printf("PR2 supports native planar Workbench screens up to 8 bitplanes.\n");
+        mr_error("MintREMOTE supports native planar Workbench\n"
+                 "screens up to 8 bitplanes.");
         goto done;
     }
-    if (((struct Library *)GfxBase)->lib_Version >= 39 &&
-        !(GetBitMapAttr(screen->RastPort.BitMap, BMA_FLAGS) & BMF_STANDARD)) {
-        printf("PR2 cannot directly read this RTG/non-standard bitmap.\n");
+    if (!(GetBitMapAttr(screen->RastPort.BitMap, BMA_FLAGS) & BMF_STANDARD)) {
+        mr_error("MintREMOTE cannot directly read this\n"
+                 "RTG/non-standard Workbench bitmap.");
         goto done;
     }
 #ifdef BMF_INTERLEAVED
     if (screen->RastPort.BitMap->Flags & BMF_INTERLEAVED) {
-        printf("PR2 does not yet support interleaved bitmaps.\n");
+        mr_error("MintREMOTE does not yet support interleaved bitmaps.");
         goto done;
     }
 #endif
 
     if (enable_input && !mr_input_open(&input)) {
-        printf("Could not open input.device for remote control.\n");
+        mr_error("Could not open input.device for remote control.");
         goto done;
     }
 
     listen_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_sock < 0) {
-        printf("Could not create TCP socket.\n");
+        mr_error("Could not create TCP socket.");
         goto done;
     }
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
@@ -775,44 +908,54 @@ int main(void)
     if (bind(listen_sock, (struct sockaddr *)&address, sizeof(address)) < 0 ||
         listen(listen_sock, 1) < 0 ||
         IoctlSocket(listen_sock, FIONBIO, (char *)&nonblocking) < 0) {
-        printf("Could not listen on TCP port %u.\n", (unsigned int)port);
+        mr_error("Could not listen on TCP port %u.\n"
+                 "Is another MintREMOTE server already running?",
+                 (unsigned int)port);
         goto done;
     }
 
     address_count = mr_local_addresses(listen_sock, port, addresses);
-    if (!mr_gui_open(screen, addresses, address_count, enable_input)) {
-        printf("Could not open the MintREMOTE GadTools window.\n");
+    sprintf(screen_text, "%ux%u, %u colours",
+            (unsigned int)screen->Width, (unsigned int)screen->Height,
+            1U << screen->RastPort.BitMap->Depth);
+    if (!mr_gui_open(screen, addresses, address_count, enable_input,
+                     screen_text)) {
+        mr_error("Could not open the MintREMOTE window.");
         goto done;
     }
-    for (i = 0; i < address_count; ++i) printf("%s\n", addresses[i]);
-    printf("MintREMOTE waiting on TCP port %u (%s). Close window or Ctrl-C to stop.\n",
+    for (i = 0; i < address_count; ++i) mr_log("%s\n", addresses[i]);
+    mr_log("MintREMOTE waiting on TCP port %u (%s). Close window or Ctrl-C to stop.\n",
            (unsigned int)port,
            enable_input ? "remote input enabled" : "view-only");
     result = 0;
     while (!mr_should_stop()) {
-        if (!mr_wait_socket(listen_sock, 0)) {
+        if (!mr_wait_socket(listen_sock, 0, mr_should_stop)) {
             if (!mr_should_stop()) {
-                printf("Waiting for a viewer failed.\n");
+                mr_error("Waiting for a viewer failed.");
                 result = 20;
             }
             break;
         }
-        client_sock = accept(listen_sock, NULL, NULL);
+        peer_length = sizeof(peer);
+        client_sock = accept(listen_sock, (struct sockaddr *)&peer,
+                             &peer_length);
         if (client_sock < 0) {
             LONG error = Errno();
             if (error == EWOULDBLOCK || error == EAGAIN || error == EINTR)
                 continue;
-            printf("Accept failed.\n");
+            mr_error("Accepting a viewer connection failed.");
             result = 20;
             break;
         }
         if (IoctlSocket(client_sock, FIONBIO, (char *)&nonblocking) < 0) {
-            printf("Could not make the viewer socket nonblocking.\n");
+            mr_log("Could not make the viewer socket nonblocking.\n");
             CloseSocket(client_sock);
             client_sock = -1;
             continue;
         }
-        mr_gui_connected(1);
+        mr_format_ipv4(peer_text, (const UBYTE *)&peer.sin_addr.s_addr);
+        drop_requested = 0;
+        mr_gui_connected(peer_text);
         mr_serve_client(client_sock, screen, delay_ticks,
                         enable_input ? &input : NULL);
         CloseSocket(client_sock);
@@ -822,7 +965,7 @@ int main(void)
             input.used = 0;
             input.qualifier = 0;
         }
-        if (!mr_should_stop()) mr_gui_connected(0);
+        if (!mr_should_stop()) mr_gui_connected(NULL);
     }
 
 done:

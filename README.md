@@ -44,7 +44,28 @@ Override the prefix when required:
 make CROSS=/opt/amiga13/m68k-amigaos/bin/m68k-amigaos-
 ```
 
-Copy `MintRemoteServer` to the Amiga and run:
+Copy `MintRemoteServer` **and** `MintRemoteServer.info` (both are in the
+`MintRemoteServer-AmigaOS` CI artifact, and `make` produces both) to the same
+Amiga drawer.
+
+### Start from Workbench
+
+Double-click the **MintRemoteServer** icon. The server runs as a normal
+Workbench GadTools application: no Shell or console window is opened, and any
+start-up problem (no TCP/IP stack, port in use, unsupported screen) is shown in
+a requester. Options are the icon's ToolTypes (select the icon, then
+**Icons > Information...**):
+
+```text
+PORT=5909
+DELAY=5
+(INPUT)
+```
+
+Remove the brackets around `(INPUT)` to allow remote mouse and keyboard
+control. `INPUT=NO` also leaves it disabled.
+
+### Start from Shell
 
 ```text
 MintRemoteServer [port] [delay_ticks] [INPUT]
@@ -65,15 +86,23 @@ second). Five ticks targets roughly ten scans per second without busy-looping.
 Input is polled once per tick so it remains responsive independently of the
 screen scan rate. Omit `INPUT` for a view-only server.
 
-The server opens a small GadTools window titled **MintREMOTE**, with a green
-running dot, the local IPv4 address and TCP port, and a **Listening** or
-**PC connected** status. Up to four active non-loopback addresses are shown
-when the Amiga has multiple interfaces. Enter one of these addresses in the
-PC client. If the stack cannot report an address, the window says so explicitly.
+Either way the server opens a GadTools window titled **MintREMOTE** in the
+centre of the Workbench screen. It shows a green running dot, the status
+(**Listening for a PC viewer** or **PC connected: <address>**), the local IPv4
+address and TCP port, the input mode and the captured screen size. Up to four
+active non-loopback addresses are shown when the Amiga has multiple
+interfaces. Enter one of these addresses in the PC client. If the stack cannot
+report an address, the window says so explicitly.
 
-Close the window to stop the server and release remote input. Ctrl-C in the
-Shell also stops it. After a viewer disconnects, the server keeps listening
-so you can reconnect. Launch the server from Shell using the commands above.
+- **Quit** (or the close gadget, Esc, `Q`, or **Project > Quit**) stops the
+  server and releases remote input.
+- **Disconnect** (or `D`, or **Project > Disconnect viewer**) drops the current
+  PC viewer and keeps listening, so it can reconnect.
+- **Project > About...** shows a non-blocking about requester.
+- Ctrl-C in the Shell also stops a Shell-started server, including while it
+  waits for a viewer. (`Break` with the process number works for `Run`.)
+
+After a viewer disconnects, the server keeps listening so you can reconnect.
 
 Requirements:
 
