@@ -1,4 +1,4 @@
-"""MintREMOTE PR1 wire protocol and planar conversion helpers."""
+"""MintREMOTE wire protocol, input packets and planar conversion helpers."""
 
 from __future__ import annotations
 
@@ -8,18 +8,32 @@ import struct
 from typing import Sequence
 
 MAGIC = b"MRM1"
-VERSION = 1
+VERSION = 2
 PIXEL_PLANAR_INDEXED = 1
 
 MSG_PALETTE = 1
 MSG_TILE = 2
 MSG_FRAME_END = 3
 MSG_GOODBYE = 4
+MSG_CAPABILITIES = 5
+
+MSG_MOUSE_MOVE = 128
+MSG_MOUSE_BUTTON = 129
+MSG_RAW_KEY = 130
+
+CAP_INPUT = 1
+
+MOUSE_LEFT = 1
+MOUSE_MIDDLE = 2
+MOUSE_RIGHT = 3
 
 HANDSHAKE = struct.Struct(">4s8H")
 MESSAGE_HEADER = struct.Struct(">BBH")
 TILE_HEADER = struct.Struct(">I5H2B")
 FRAME_END = struct.Struct(">IHH")
+CAPABILITIES = struct.Struct(">H")
+MOUSE_MOVE = struct.Struct(">HH")
+BUTTON_OR_KEY = struct.Struct(">BB")
 
 
 @dataclass(frozen=True)
@@ -31,6 +45,7 @@ class Handshake:
     depth: int
     pixel_format: int
     palette_entries: int
+    version: int = VERSION
 
 
 @dataclass(frozen=True)
@@ -63,13 +78,17 @@ def read_handshake(sock: socket.socket) -> Handshake:
     )
     if magic != MAGIC:
         raise ValueError(f"not a MintREMOTE stream: {magic!r}")
-    if version != VERSION:
+    if version not in (1, VERSION):
         raise ValueError(f"unsupported protocol version {version}")
     if pixel_format != PIXEL_PLANAR_INDEXED:
         raise ValueError(f"unsupported pixel format {pixel_format}")
     if not (1 <= depth <= 8 and entries == 1 << depth):
         raise ValueError("invalid planar depth/palette declaration")
-    return Handshake(width, height, tw, th, depth, pixel_format, entries)
+    if not (0 < width <= 4096 and 0 < height <= 4096 and width * height <= 4194304):
+        raise ValueError("invalid or excessive screen dimensions")
+    if not (0 < tw <= width and 0 < th <= height):
+        raise ValueError("invalid tile dimensions")
+    return Handshake(width, height, tw, th, depth, pixel_format, entries, version)
 
 
 def read_message(sock: socket.socket) -> tuple[int, bytes]:
@@ -98,6 +117,10 @@ def parse_tile(payload: bytes) -> Tile:
     if reserved != 0:
         raise ValueError("unsupported tile flags")
     data = payload[TILE_HEADER.size :]
+    if not (width > 0 and height > 0 and 1 <= depth <= 8):
+        raise ValueError("invalid tile dimensions/depth")
+    if row_bytes < (width + 7) // 8:
+        raise ValueError("tile row is too short")
     if len(data) != row_bytes * height * depth:
         raise ValueError("tile planar data length mismatch")
     return Tile(frame_id, x, y, width, height, row_bytes, depth, data)
@@ -109,6 +132,38 @@ def parse_frame_end(payload: bytes) -> tuple[int, int, int]:
     return FRAME_END.unpack(payload)
 
 
+def parse_capabilities(payload: bytes) -> int:
+    if len(payload) != CAPABILITIES.size:
+        raise ValueError("invalid capabilities message")
+    return CAPABILITIES.unpack(payload)[0]
+
+
+def parse_mouse_move(payload: bytes) -> tuple[int, int]:
+    if len(payload) != MOUSE_MOVE.size:
+        raise ValueError("invalid mouse-move message")
+    return MOUSE_MOVE.unpack(payload)
+
+
+def parse_button_or_key(payload: bytes) -> tuple[int, bool]:
+    if len(payload) != BUTTON_OR_KEY.size:
+        raise ValueError("invalid button/key message")
+    code, down = BUTTON_OR_KEY.unpack(payload)
+    if down not in (0, 1):
+        raise ValueError("invalid button/key state")
+    return code, bool(down)
+
+
+def validate_tile(tile: Tile, screen_width: int, screen_height: int) -> None:
+    if not (tile.x >= 0 and tile.y >= 0 and tile.width > 0 and tile.height > 0):
+        raise ValueError("invalid tile coordinates/dimensions")
+    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
+        raise ValueError("tile lies outside framebuffer")
+    if not 1 <= tile.depth <= 8 or tile.row_bytes < (tile.width + 7) // 8:
+        raise ValueError("invalid tile planar layout")
+    if len(tile.data) != tile.row_bytes * tile.height * tile.depth:
+        raise ValueError("tile planar data length mismatch")
+
+
 def apply_planar_tile(
     framebuffer: bytearray,
     screen_width: int,
@@ -116,10 +171,7 @@ def apply_planar_tile(
     palette: Sequence[tuple[int, int, int]],
     tile: Tile,
 ) -> None:
-    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
-        raise ValueError("tile lies outside framebuffer")
-    if tile.depth < 1 or tile.depth > 8:
-        raise ValueError("unsupported tile depth")
+    validate_tile(tile, screen_width, screen_height)
 
     plane_stride = tile.row_bytes * tile.height
     for row in range(tile.height):
@@ -148,10 +200,7 @@ def apply_planar_tile_indices(
     message immediately recolours unchanged pixels, as real Amiga hardware
     does, without forcing the server to resend every tile.
     """
-    if tile.x + tile.width > screen_width or tile.y + tile.height > screen_height:
-        raise ValueError("tile lies outside framebuffer")
-    if tile.depth < 1 or tile.depth > 8:
-        raise ValueError("unsupported tile depth")
+    validate_tile(tile, screen_width, screen_height)
 
     plane_stride = tile.row_bytes * tile.height
     for row in range(tile.height):
@@ -172,11 +221,12 @@ def pack_message(msg_type: int, payload: bytes) -> bytes:
 
 
 def pack_handshake(
-    width: int, height: int, tile_width: int, tile_height: int, depth: int
+    width: int, height: int, tile_width: int, tile_height: int, depth: int,
+    version: int = VERSION,
 ) -> bytes:
     return HANDSHAKE.pack(
         MAGIC,
-        VERSION,
+        version,
         width,
         height,
         tile_width,
@@ -208,6 +258,28 @@ def pack_tile(tile: Tile) -> bytes:
 
 def pack_frame_end(frame_id: int, changed_tiles: int, scan_ms: int = 0) -> bytes:
     return pack_message(MSG_FRAME_END, FRAME_END.pack(frame_id, changed_tiles, scan_ms))
+
+
+def pack_capabilities(capabilities: int) -> bytes:
+    return pack_message(MSG_CAPABILITIES, CAPABILITIES.pack(capabilities))
+
+
+def pack_mouse_move(x: int, y: int) -> bytes:
+    if not (0 <= x <= 65535 and 0 <= y <= 65535):
+        raise ValueError("mouse position is outside the protocol range")
+    return pack_message(MSG_MOUSE_MOVE, MOUSE_MOVE.pack(x, y))
+
+
+def pack_mouse_button(button: int, down: bool) -> bytes:
+    if button not in (MOUSE_LEFT, MOUSE_MIDDLE, MOUSE_RIGHT):
+        raise ValueError("unknown mouse button")
+    return pack_message(MSG_MOUSE_BUTTON, BUTTON_OR_KEY.pack(button, int(down)))
+
+
+def pack_raw_key(raw_key: int, down: bool) -> bytes:
+    if not 0 <= raw_key < 128:
+        raise ValueError("raw key must be in the range 0-127")
+    return pack_message(MSG_RAW_KEY, BUTTON_OR_KEY.pack(raw_key, int(down)))
 
 
 def encode_indexed_tile(

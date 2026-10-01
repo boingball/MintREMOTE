@@ -79,3 +79,22 @@ acknowledgements or screen-mode-change message. Those are not accidentally
 missing: the first test is intended to measure native planar capture cost,
 changed-tile behaviour and real TCP throughput before the protocol grows.
 
+
+## Desktop client compatibility with protocol v2
+
+The desktop client also accepts version 2, used by the optional remote-input
+server in PR #2. The 20-byte handshake and display messages are unchanged.
+Message 5 contains a big-endian u16 capability mask; bit 0 enables remote
+input. Until this is received, the client sends no input.
+
+Client input uses the same four-byte message header:
+
+| Type | Payload |
+|---:|---|
+| 128 | u16 pointer x, u16 pointer y (absolute screen coordinates) |
+| 129 | u8 mouse button (1 left, 2 middle, 3 right), u8 state (1 down, 0 up) |
+| 130 | u8 Amiga raw key (0–127), u8 state (1 down, 0 up) |
+
+Version 1 always remains view-only. The desktop client rejects excessive screen
+sizes (over 4096 in either dimension or 4,194,304 pixels), invalid row lengths,
+out-of-bounds tiles and tiles whose depth differs from the handshake.

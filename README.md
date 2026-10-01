@@ -57,16 +57,35 @@ Requirements:
 - A native planar Workbench screen
 - TCP/IP stack providing `bsdsocket.library` v4+
 
-## Run the Windows viewer
+## Windows desktop client
 
 Install Python 3 and Pillow:
 
 ```powershell
 py -m pip install -r viewer/requirements.txt
-py viewer/mintremote_viewer.py 192.168.1.50
+py viewer/mintremote_viewer.py
 ```
 
-Use the Amiga's IP address. The viewer defaults to TCP port 5909.
+Enter the Amiga's IP address and click **Connect**. The client remembers the
+address, port and display scale. It offers fit-to-window or 1x–4x scaling,
+fullscreen (F11), native-resolution PNG screenshots and reconnecting without
+restarting the app. F12 releases remote input and returns focus to the PC.
+
+For a standalone **MintREMOTE.exe** with no Python installation required,
+download the `MintREMOTE-Windows-x64` artifact from the **Windows client**
+GitHub Actions run for this branch. You can also build it locally:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/build_windows.ps1
+```
+
+The output is `dist/MintREMOTE.exe`. See [Windows client guide](docs/WINDOWS_CLIENT.md).
+
+The client accepts both protocol v1 (current `main` server, view only) and
+protocol v2 from [PR #2](https://github.com/boingball/MintREMOTE/pull/2).
+Mouse/keyboard control is available only when that server advertises input
+support, started with `MintRemoteServer 5909 5 INPUT`. The Amiga source is
+unchanged by the desktop client work.
 
 The viewer can be tested before using an Amiga:
 
