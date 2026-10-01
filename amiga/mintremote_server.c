@@ -1,5 +1,5 @@
 /*
- * MintREMOTE PR2 native-planar capture and remote-input prototype.
+ * MintREMOTE native-planar capture, remote input and GadTools status window.
  *
  * Captures the public Workbench screen as native bitplane tiles and sends
  * only changed tiles to a single TCP client. The PC performs all planar to
@@ -25,11 +25,16 @@
 #include <proto/bsdsocket.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "mintremote_protocol.h"
+#include "mintremote_gui.h"
+#include "mintremote_io.h"
 
 struct Library *SocketBase = NULL;
 struct IntuitionBase *IntuitionBase = NULL;
@@ -234,18 +239,74 @@ static void mr_input_close(struct MRInputContext *input)
     }
 }
 
+/* Latch quit requests, including those consumed by WaitSelect. */
+static int stop_requested;
+
+static int mr_should_stop(void)
+{
+    if (mr_gui_poll() ||
+        (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C))
+        stop_requested = 1;
+    return stop_requested;
+}
+
+/* Socket waits also wake for Intuition messages. All sockets are nonblocking. */
+static int mr_wait_socket(LONG sock, int writing)
+{
+    while (!mr_should_stop()) {
+        fd_set fds;
+        struct timeval timeout;
+        ULONG signals = mr_gui_signal() | SIGBREAKF_CTRL_C;
+        LONG ready;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 100000;
+        ready = WaitSelect(sock + 1, writing ? NULL : &fds,
+                            writing ? &fds : NULL, NULL, &timeout, &signals);
+        if (signals & SIGBREAKF_CTRL_C) stop_requested = 1;
+        if (mr_should_stop()) return 0;
+        if (ready > 0 && FD_ISSET(sock, &fds)) return 1;
+        if (ready < 0 && Errno() != EINTR) return 0;
+    }
+    return 0;
+}
+
+static long mr_socket_write(void *context, const unsigned char *data,
+                            unsigned long length)
+{
+    return send(*(LONG *)context, (char *)data, (LONG)length, 0);
+}
+
+static int mr_write_error(void *context)
+{
+    LONG error = Errno();
+    (void)context;
+    if (error == EINTR) return MR_IO_RETRY;
+    if (error == EWOULDBLOCK || error == EAGAIN) return MR_IO_WAIT;
+    return MR_IO_FATAL;
+}
+
+static int mr_write_wait(void *context)
+{
+    return mr_wait_socket(*(LONG *)context, 1);
+}
+
+static int mr_write_stopped(void *context)
+{
+    (void)context;
+    return mr_should_stop();
+}
+
 static int mr_send_all(LONG sock, const UBYTE *data, ULONG length)
 {
-    ULONG sent_total = 0;
-
-    while (sent_total < length) {
-        ULONG left = length - sent_total;
-        LONG chunk = (LONG)(left > 16384UL ? 16384UL : left);
-        LONG sent = send(sock, (char *)(data + sent_total), chunk, 0);
-        if (sent <= 0) return 0;
-        sent_total += (ULONG)sent;
-    }
-    return 1;
+    struct MRWriteOps ops;
+    ops.context = &sock;
+    ops.write = mr_socket_write;
+    ops.error = mr_write_error;
+    ops.wait = mr_write_wait;
+    ops.stopped = mr_write_stopped;
+    return mr_write_all(&ops, data, length);
 }
 
 static int mr_send_message_header(LONG sock, UBYTE type, UWORD payload_bytes)
@@ -331,7 +392,11 @@ static int mr_poll_input(LONG sock, struct MRInputContext *input,
 
     received = recv(sock, (char *)input->buffer + input->used,
                     MR_INPUT_BUFFER_BYTES - input->used, 0);
-    if (received <= 0) return 0;
+    if (received < 0) {
+        LONG error = Errno();
+        return error == EWOULDBLOCK || error == EAGAIN || error == EINTR;
+    }
+    if (received == 0) return 0;
     input->used = (UWORD)(input->used + received);
 
     while (input->used >= MR_MESSAGE_HEADER_BYTES) {
@@ -453,11 +518,6 @@ static int mr_send_frame_end(LONG sock, ULONG frame_id, UWORD changed_tiles)
            mr_send_all(sock, payload, sizeof(payload));
 }
 
-static int mr_ctrl_c_pressed(void)
-{
-    return (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) != 0;
-}
-
 static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
                            struct MRInputContext *input)
 {
@@ -505,7 +565,7 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
            input ? "enabled" : "disabled");
     connected = 1;
 
-    while (!mr_ctrl_c_pressed()) {
+    while (!mr_should_stop()) {
         UWORD ty;
         UWORD changed = 0;
 
@@ -518,6 +578,7 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
 
         for (ty = 0; ty < tiles_y; ++ty) {
             UWORD tx;
+            if (mr_should_stop()) goto done;
             for (tx = 0; tx < tiles_x; ++tx) {
                 UWORD x = (UWORD)(tx * MR_TILE_WIDTH);
                 UWORD y = (UWORD)(ty * MR_TILE_HEIGHT);
@@ -553,7 +614,8 @@ static int mr_serve_client(LONG sock, struct Screen *screen, ULONG delay_ticks,
         {
             ULONG wait_tick;
             for (wait_tick = 0; wait_tick < delay_ticks; ++wait_tick) {
-                if (!mr_poll_input(sock, input, screen)) goto done;
+                if (mr_should_stop() ||
+                    !mr_poll_input(sock, input, screen)) goto done;
                 Delay(1);
             }
         }
@@ -570,6 +632,63 @@ done:
     return connected;
 }
 
+/* SIOCGIFCONF works without hostname/DNS setup on AmiTCP-compatible stacks.
+ * Records may have extended BSD sockaddr lengths; old IPv4 records use 16.
+ */
+static UWORD mr_local_addresses(LONG sock, ULONG port,
+    char addresses[MR_MAX_ADDRESSES][MR_ADDRESS_TEXT_BYTES])
+{
+    struct ifconf config;
+    UBYTE *buffer = (UBYTE *)AllocVec(4096, MEMF_PUBLIC | MEMF_CLEAR);
+    UWORD count = 0;
+    LONG offset = 0;
+    if (!buffer) goto unavailable;
+    memset(&config, 0, sizeof(config));
+    config.ifc_len = 4096;
+    config.ifc_buf = (char *)buffer;
+    if (IoctlSocket(sock, SIOCGIFCONF, (char *)&config) < 0 ||
+        config.ifc_len < 0 || config.ifc_len > 4096) goto free_buffer;
+    while (offset + (LONG)sizeof(struct ifreq) <= config.ifc_len &&
+           count < MR_MAX_ADDRESSES) {
+        struct ifreq *entry = (struct ifreq *)(buffer + offset);
+        struct ifreq flags;
+        struct sockaddr_in *ip = (struct sockaddr_in *)&entry->ifr_addr;
+        /* Reading the first byte supports both sockaddr layouts in Amiga SDKs:
+         * BSD sa_len/sa_family, and the earlier 16-bit sa_family (big endian).
+         */
+        ULONG address_length = ((UBYTE *)&entry->ifr_addr)[0];
+        ULONG record_length = IFNAMSIZ +
+            (address_length > sizeof(struct sockaddr) ? address_length :
+             sizeof(struct sockaddr));
+        ULONG host;
+        UWORD i;
+        char text[MR_ADDRESS_TEXT_BYTES];
+        if (record_length > (ULONG)(config.ifc_len - offset)) break;
+        offset += record_length;
+        if (entry->ifr_addr.sa_family != AF_INET) continue;
+        host = ntohl(ip->sin_addr.s_addr);
+        if (!host || (host >> 24) == 127) continue;
+        memset(&flags, 0, sizeof(flags));
+        memcpy(flags.ifr_name, entry->ifr_name, IFNAMSIZ);
+        if (IoctlSocket(sock, SIOCGIFFLAGS, (char *)&flags) == 0 &&
+            (!(flags.ifr_flags & IFF_UP) || (flags.ifr_flags & IFF_LOOPBACK)))
+            continue;
+        sprintf(text, "IP: %lu.%lu.%lu.%lu:%lu", (host >> 24) & 255UL,
+                 (host >> 16) & 255UL, (host >> 8) & 255UL, host & 255UL, port);
+        for (i = 0; i < count; ++i)
+            if (strcmp(addresses[i], text) == 0) break;
+        if (i == count) strcpy(addresses[count++], text);
+    }
+free_buffer:
+    FreeVec(buffer);
+unavailable:
+    if (!count) {
+        strcpy(addresses[0], "IP unavailable - check stack");
+        count = 1;
+    }
+    return count;
+}
+
 int main(void)
 {
     LONG listen_sock = -1;
@@ -582,6 +701,9 @@ int main(void)
     ULONG port = MR_DEFAULT_PORT;
     ULONG delay_ticks = 5;
     LONG reuse = 1;
+    LONG nonblocking = 1;
+    char addresses[MR_MAX_ADDRESSES][MR_ADDRESS_TEXT_BYTES];
+    UWORD address_count, i;
     int enable_input = 0;
     int result = 20;
 
@@ -606,12 +728,12 @@ int main(void)
     }
 
     IntuitionBase = (struct IntuitionBase *)OpenLibrary(
-        (CONST_STRPTR)"intuition.library", 37);
+        (CONST_STRPTR)"intuition.library", 39);
     GfxBase = (struct GfxBase *)OpenLibrary(
-        (CONST_STRPTR)"graphics.library", 37);
+        (CONST_STRPTR)"graphics.library", 39);
     SocketBase = OpenLibrary((CONST_STRPTR)"bsdsocket.library", 4);
     if (!IntuitionBase || !GfxBase || !SocketBase) {
-        printf("MintREMOTE requires intuition/graphics v37 and bsdsocket v4.\n");
+        printf("MintREMOTE requires intuition/graphics v39 and bsdsocket v4.\n");
         goto done;
     }
 
@@ -656,28 +778,63 @@ int main(void)
     address.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(listen_sock, (struct sockaddr *)&address, sizeof(address)) < 0 ||
-        listen(listen_sock, 1) < 0) {
+        listen(listen_sock, 1) < 0 ||
+        IoctlSocket(listen_sock, FIONBIO, (char *)&nonblocking) < 0) {
         printf("Could not listen on TCP port %u.\n", (unsigned int)port);
         goto done;
     }
 
-    printf("MintREMOTE PR2 waiting on TCP port %u (%s). Ctrl-C stops it.\n",
-           (unsigned int)port,
-           enable_input ? "remote input enabled" : "view-only");
-    client_sock = accept(listen_sock, NULL, NULL);
-    if (client_sock < 0) {
-        printf("Accept failed or was interrupted.\n");
+    address_count = mr_local_addresses(listen_sock, port, addresses);
+    if (!mr_gui_open(screen, addresses, address_count, enable_input)) {
+        printf("Could not open the MintREMOTE GadTools window.\n");
         goto done;
     }
-
-    mr_serve_client(client_sock, screen, delay_ticks,
-                    enable_input ? &input : NULL);
+    for (i = 0; i < address_count; ++i) printf("%s\n", addresses[i]);
+    printf("MintREMOTE waiting on TCP port %u (%s). Close window or Ctrl-C to stop.\n",
+           (unsigned int)port,
+           enable_input ? "remote input enabled" : "view-only");
     result = 0;
+    while (!mr_should_stop()) {
+        if (!mr_wait_socket(listen_sock, 0)) {
+            if (!mr_should_stop()) {
+                printf("Waiting for a viewer failed.\n");
+                result = 20;
+            }
+            break;
+        }
+        client_sock = accept(listen_sock, NULL, NULL);
+        if (client_sock < 0) {
+            LONG error = Errno();
+            if (error == EWOULDBLOCK || error == EAGAIN || error == EINTR)
+                continue;
+            printf("Accept failed.\n");
+            result = 20;
+            break;
+        }
+        if (IoctlSocket(client_sock, FIONBIO, (char *)&nonblocking) < 0) {
+            printf("Could not make the viewer socket nonblocking.\n");
+            CloseSocket(client_sock);
+            client_sock = -1;
+            continue;
+        }
+        mr_gui_connected(1);
+        mr_serve_client(client_sock, screen, delay_ticks,
+                        enable_input ? &input : NULL);
+        CloseSocket(client_sock);
+        client_sock = -1;
+        if (enable_input) {
+            mr_release_all_input(&input);
+            input.used = 0;
+            input.qualifier = 0;
+        }
+        if (!mr_should_stop()) mr_gui_connected(0);
+    }
 
 done:
     if (client_sock >= 0) CloseSocket(client_sock);
     if (listen_sock >= 0) CloseSocket(listen_sock);
     mr_input_close(&input);
+    mr_gui_close();
     if (screen) UnlockPubScreen((UBYTE *)"Workbench", screen);
     if (SocketBase) CloseLibrary(SocketBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);

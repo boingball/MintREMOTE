@@ -65,6 +65,16 @@ second). Five ticks targets roughly ten scans per second without busy-looping.
 Input is polled once per tick so it remains responsive independently of the
 screen scan rate. Omit `INPUT` for a view-only server.
 
+The server opens a small GadTools window titled **MintREMOTE**, with a green
+running dot, the local IPv4 address and TCP port, and a **Listening** or
+**PC connected** status. Up to four active non-loopback addresses are shown
+when the Amiga has multiple interfaces. Enter one of these addresses in the
+PC client. If the stack cannot report an address, the window says so explicitly.
+
+Close the window to stop the server and release remote input. Ctrl-C in the
+Shell also stops it. After a viewer disconnects, the server keeps listening
+so you can reconnect. Launch the server from Shell using the commands above.
+
 Requirements:
 
 - AmigaOS 3.1 or later
@@ -113,13 +123,16 @@ py viewer/mintremote_viewer.py 127.0.0.1
 make check
 ```
 
-The host-side tests verify protocol framing, planar tile packing and decoding.
+The host-side tests verify protocol framing, planar tile packing and decoding,
+and nonblocking server-send retries and cancellation (requires a host C compiler).
 The Amiga executable still needs a Bebbo cross-toolchain and real-hardware or
 emulator testing.
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the wire format,
 [docs/PR1_TEST_PLAN.md](docs/PR1_TEST_PLAN.md) for the capture tests and
 [docs/PR2_TEST_PLAN.md](docs/PR2_TEST_PLAN.md) for remote-input tests.
+See [server GUI test plan](docs/SERVER_GUI_TEST_PLAN.md) for window, IP address
+and shutdown checks on the Amiga.
 
 ## License
 
