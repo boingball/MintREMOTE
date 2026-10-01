@@ -8,18 +8,31 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "viewer"))
 
 from protocol import (  # noqa: E402
+    CAP_INPUT,
+    MSG_CAPABILITIES,
     MSG_FRAME_END,
+    MSG_MOUSE_BUTTON,
+    MSG_MOUSE_MOVE,
     MSG_PALETTE,
     MSG_TILE,
+    MSG_RAW_KEY,
+    MOUSE_LEFT,
     Tile,
     apply_planar_tile,
     apply_planar_tile_indices,
     encode_indexed_tile,
     pack_frame_end,
+    pack_capabilities,
     pack_handshake,
     pack_palette,
+    pack_mouse_button,
+    pack_mouse_move,
+    pack_raw_key,
     pack_tile,
     parse_frame_end,
+    parse_button_or_key,
+    parse_capabilities,
+    parse_mouse_move,
     parse_palette,
     parse_tile,
     read_handshake,
@@ -82,6 +95,33 @@ class ProtocolTests(unittest.TestCase):
         msg_type, payload = read_message(right)
         self.assertEqual(msg_type, MSG_FRAME_END)
         self.assertEqual(parse_frame_end(payload), (9, 1, 12))
+
+    def test_capabilities_and_input_messages(self) -> None:
+        left, right = socket.socketpair()
+        self.addCleanup(left.close)
+        self.addCleanup(right.close)
+        left.sendall(
+            pack_capabilities(CAP_INPUT)
+            + pack_mouse_move(319, 199)
+            + pack_mouse_button(MOUSE_LEFT, True)
+            + pack_raw_key(0x20, True)
+        )
+
+        msg_type, payload = read_message(right)
+        self.assertEqual(msg_type, MSG_CAPABILITIES)
+        self.assertEqual(parse_capabilities(payload), CAP_INPUT)
+
+        msg_type, payload = read_message(right)
+        self.assertEqual(msg_type, MSG_MOUSE_MOVE)
+        self.assertEqual(parse_mouse_move(payload), (319, 199))
+
+        msg_type, payload = read_message(right)
+        self.assertEqual(msg_type, MSG_MOUSE_BUTTON)
+        self.assertEqual(parse_button_or_key(payload), (MOUSE_LEFT, True))
+
+        msg_type, payload = read_message(right)
+        self.assertEqual(msg_type, MSG_RAW_KEY)
+        self.assertEqual(parse_button_or_key(payload), (0x20, True))
 
 
 if __name__ == "__main__":

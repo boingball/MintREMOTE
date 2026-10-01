@@ -1,7 +1,7 @@
 #ifndef MINTREMOTE_PROTOCOL_H
 #define MINTREMOTE_PROTOCOL_H
 
-#define MR_PROTOCOL_VERSION 1
+#define MR_PROTOCOL_VERSION 2
 #define MR_DEFAULT_PORT 5909
 #define MR_TILE_WIDTH 32
 #define MR_TILE_HEIGHT 16
@@ -12,10 +12,21 @@
 #define MR_MSG_TILE 2
 #define MR_MSG_FRAME_END 3
 #define MR_MSG_GOODBYE 4
+#define MR_MSG_CAPABILITIES 5
+
+/* Client-to-server messages. */
+#define MR_MSG_MOUSE_MOVE 128
+#define MR_MSG_MOUSE_BUTTON 129
+#define MR_MSG_RAW_KEY 130
+
+#define MR_CAP_INPUT 1
+
+#define MR_MOUSE_LEFT 1
+#define MR_MOUSE_MIDDLE 2
+#define MR_MOUSE_RIGHT 3
 
 #define MR_HANDSHAKE_BYTES 20
 #define MR_MESSAGE_HEADER_BYTES 4
 #define MR_TILE_HEADER_BYTES 16
 
 #endif
-
